@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache/
+
+# Virtual environments
+.venv
+
+# VS Code
+.vscode/
+
+# Project
+figure/
+plotting/
+dataset
+outputs
+.opencode/
+AGENTS.md
+**Baseline*
