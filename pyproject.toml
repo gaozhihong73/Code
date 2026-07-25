@@ -47,5 +47,4 @@ opencv-python-headless = "cv2"
 dev = ["ruff>=0.16.0"]
 
 [tool.ruff.lint]
-# 忽略 N999 (invalid-module-name) 规则
 ignore = ["N999", "BLE001", "RUF059"]
