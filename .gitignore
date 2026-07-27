@@ -6,14 +6,32 @@ dist/
 wheels/
 *.egg-info
 .ruff_cache/
+*$py.class
+.eggs/
 
 # Virtual environments
-.venv
+.venv/
 
-# VS Code
+# IDE
+.idea/
 .vscode/
 
-# Project
+# 日志与缓存
+*.log
+**/logs
+
+# 备份
+backup/
+*.bak
+
+# 其它
+/data/
+/docs/
+.workbuddy/
+.qoderignore
+.qoder/
+.opencode
+AGENTS.md
 figure/
 plotting/
 dataset
@@ -21,3 +39,5 @@ outputs
 .opencode/
 AGENTS.md
 **Baseline*
+**_Train.py
+
