@@ -45,6 +45,16 @@ class TFPPConfig(BaseModel):
     num_layers: int = 2  # 编码器层数
     num_embeddings: int = 4  # 嵌入层维度
     d_ff: int = 256  # 前馈网络隐藏维度
+    degree: int = Field(
+        default=3,
+        ge=0,
+        description="Legendre 多项式阶数, 0=退化为纯加性(仅常数项)",
+    )
+    ablation_mode: str = Field(
+        default="none",
+        pattern="^(none|wide|deep|add)$",
+        description="模型消融模式: none=完整模型, wide=仅宽通路, deep=仅深通路, add=去掉门控直接相加",
+    )
     time_coordinates: list[float] = Field(
         default_factory=lambda: [
             10,

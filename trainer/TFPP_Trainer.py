@@ -117,6 +117,8 @@ class TFPPTrainer:
         self.num_layers = config.num_layers
         self.num_embeddings = config.num_embeddings
         self.d_ff = config.d_ff
+        self.degree = config.degree
+        self.ablation_mode = config.ablation_mode
         self.time_coordinates = config.time_coordinates
 
         # 模型初始化
@@ -138,6 +140,8 @@ class TFPPTrainer:
             time_coordinates=self.time_coordinates,
             phenotype_names=self.phenotype_names,
             dropout=self.dropout,
+            degree=self.degree,
+            ablation_mode=self.ablation_mode,
         ).to(self.device)
 
     def _create_dataset(self):

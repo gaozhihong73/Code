@@ -11,6 +11,11 @@ from model.TFPP import TFPP
 from utils import denormalize_phenotype, load_scalers
 
 
+def _str_to_bool(s: str) -> bool:
+    """将 'true'/'false' 字符串正确解析为布尔值。"""
+    return s.strip().lower() == "true"
+
+
 def parse_args():
     """解析推理脚本的命令行参数。"""
     parser = argparse.ArgumentParser(
@@ -68,7 +73,29 @@ def parse_args():
         "--seed", type=int, default=73, help="随机种子 (需与训练时一致)"
     )
     parser.add_argument(
-        "--scaler_type", type=str, default="zscore", help="归一化缩放器类型"
+        "--norm_method",
+        type=str,
+        default="global",
+        choices=["global", "timepoint", "residual_global"],
+        help="归一化策略 (需与训练时一致)",
+    )
+    parser.add_argument(
+        "--scaler_type",
+        type=str,
+        default="zscore",
+        choices=["zscore", "minmax", "robust"],
+        help="归一化缩放器类型 (需与训练时一致)",
+    )
+
+    # ================= 推理运行时参数 =================
+    parser.add_argument("--batch_size", type=int, default=32, help="推理批次大小")
+    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader 工作线程数")
+    parser.add_argument(
+        "--pheno_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help="可选: 显式指定表型名称列表 (覆盖 scaler 中记录的值; 仅当与训练时完全一致时使用)",
     )
 
     # ================= 模型结构参数 (需与训练时一致) =================
@@ -79,11 +106,32 @@ def parse_args():
         default=[10, 12, 14, 15, 17, 19, 24, 26, 37, 44, 51, 65, 80, 101],
         help="采样时间点坐标列表",
     )
-    parser.add_argument("--batch_size", type=int, default=32, help="推理批次大小")
-    parser.add_argument("--d_model", type=int, default=64)
-    parser.add_argument("--num_heads", type=int, default=4)
-    parser.add_argument("--num_layers", type=int, default=2)
-    parser.add_argument("--d_ff", type=int, default=256)
+    parser.add_argument("--d_model", type=int, default=64, help="Transformer 隐藏维度")
+    parser.add_argument("--num_heads", type=int, default=4, help="多头注意力机制的头数")
+    parser.add_argument("--num_layers", type=int, default=2, help="编码器层数 (网络深度)")
+    parser.add_argument("--d_ff", type=int, default=256, help="前馈网络隐藏层维度")
+    parser.add_argument(
+        "--num_embeddings",
+        type=int,
+        default=4,
+        help="SNP 类别嵌入维度 (需与训练时一致)",
+    )
+    parser.add_argument(
+        "--degree",
+        type=int,
+        default=3,
+        help="Legendre 多项式阶数 (需与训练时一致)",
+    )
+    parser.add_argument(
+        "--ablation_mode",
+        type=str,
+        default="none",
+        choices=["none", "wide", "deep", "add"],
+        help="模型消融模式 (需与训练时一致)",
+    )
+    parser.add_argument(
+        "--dropout", type=float, default=0.0, help="推理时的 Dropout (通常保持 0.0)"
+    )
 
     return parser.parse_args()
 
@@ -97,17 +145,19 @@ def predict():
     # 1. 加载归一化器信息
     print(f"[*] 正在加载归一化器: {args.scaler_path}")
     scalers_pkg = load_scalers(args.scaler_path)
-    phenotype_names = scalers_pkg["phenotype_names"]
+    phenotype_names = (
+        args.pheno_names if args.pheno_names is not None else scalers_pkg["phenotype_names"]
+    )
     norm_method = scalers_pkg["norm_method"]
 
     # 2. 判断输入模式以获取 SNP 维度
-    # 如果是预测测试集，需要先加载 dataset 才能知道维度；如果是外部文件，直接读取 numpy
     if args.input_snp:
         print(f"[*] 检测到外部输入文件: {args.input_snp}")
         if not Path(args.input_snp).exists():
             raise FileNotFoundError(f"SNP文件不存在: {args.input_snp}")
         external_snp_data = np.load(args.input_snp)
         snp_dim = external_snp_data.shape[1]
+        test_loader = None
     else:
         print(f"[*] 未检测到外部输入文件，将复现测试集进行预测 (Seed: {args.seed})...")
         dataset = TFPPDataset(args.snp_file, args.pheno_dir, phenotype_names)
@@ -122,7 +172,7 @@ def predict():
             val_ratio=args.val_ratio,
             seed=args.seed,
             device=device.type,
-            num_workers=4,
+            num_workers=args.num_workers,
         )
 
     # 3. 初始化模型结构并加载权重
@@ -133,13 +183,17 @@ def predict():
         num_heads=args.num_heads,
         num_layers=args.num_layers,
         d_ff=args.d_ff,
-        num_embeddings=4,
+        num_embeddings=args.num_embeddings,
         time_coordinates=args.time_coordinates,
         phenotype_names=phenotype_names,
-        dropout=0.0,  # 推理时关闭 Dropout
+        dropout=args.dropout,
+        degree=args.degree,
+        ablation_mode=args.ablation_mode,
     ).to(device)
 
-    checkpoint = torch.load(args.model_path, map_location=device)
+    checkpoint = torch.load(
+        args.model_path, map_location=device, weights_only=True
+    )
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
     model.eval()
