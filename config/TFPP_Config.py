@@ -5,9 +5,8 @@ from pydantic import BaseModel, Field
 
 
 class TFPPConfig(BaseModel):
-    """实验配置类"""
+    """TFPP 表型预测模型的训练与推理配置。"""
 
-    # 使用工厂函数动态生成实验名
     exp_name: str = Field(
         default_factory=lambda: (
             f"exp_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}"
@@ -63,12 +62,12 @@ class TFPPConfig(BaseModel):
             80,
             101,
         ],
-        min_length=1,  # 自动验证：列表至少需要包含一个元素
+        min_length=1,
         description="选择的表型时间点",
-    )  # 真实的采样时间点
+    )
     phenotype_names: list[str] = Field(
         default_factory=lambda: ["RGBVI"],
-        min_length=1,  # 自动验证：列表至少需要包含一个元素
+        min_length=1,
         description="选择的表型特征列表",
     )
 

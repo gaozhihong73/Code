@@ -9,6 +9,7 @@ from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY
 
 
 def to_tensor(x):
+    """将输入数组转换为 float32 类型的 PyTorch 张量。"""
     return torch.tensor(x, dtype=torch.float32)
 
 
@@ -20,8 +21,43 @@ def _apply_normalization(
     norm_method: str,
     scaler_type: str,
 ):
-    """
-    公共辅助函数：动态获取并执行归一化策略
+    """动态获取并执行归一化策略。
+
+    根据指定的 ``scaler_type`` 和 ``norm_method``，从注册表中获取对应的
+    缩放器类与归一化函数，对训练/验证/测试三组表型数据执行拟合并变换。
+
+    Parameters
+    ----------
+    train_phenotype : np.ndarray
+        训练集表型数据，形状为 ``(n_sample_train, n_pheno, n_time)``。
+    val_phenotype : np.ndarray
+        验证集表型数据，形状为 ``(n_sample_val, n_pheno, n_time)``。
+    test_phenotype : np.ndarray
+        测试集表型数据，形状为 ``(n_sample_test, n_pheno, n_time)``。
+    phenotype_names : list[str]
+        表型名称列表，用于在 scaler 元信息中标识各表型。
+    norm_method : str
+        归一化策略名称（如 ``'global'``、``'timepoint'``、``'residual_global'`` 等），
+        必须在 ``NORM_FUNC_REGISTRY`` 中注册。
+    scaler_type : str
+        缩放器类型（如 ``'zscore'``、``'minmax'``、``'robust'``），
+        必须在 ``SCALER_REGISTRY`` 中注册。
+
+    Returns
+    -------
+    train_phe_norm : np.ndarray
+        归一化后的训练集表型。
+    val_phe_norm : np.ndarray
+        归一化后的验证集表型。
+    test_phe_norm : np.ndarray
+        归一化后的测试集表型。
+    pheno_meta : dict
+        包含 scaler 实例、表型名称等元信息的字典，用于推理阶段逆变换。
+
+    Raises
+    ------
+    ValueError
+        当 ``scaler_type`` 或 ``norm_method`` 不在对应注册表中时抛出。
     """
     if scaler_type not in SCALER_REGISTRY:
         raise ValueError(
@@ -55,8 +91,49 @@ def _build_dataloaders_and_scalers(
     num_workers: int,
     device: str,
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
-    """
-    公共辅助函数：组装 TensorDataset、构建 DataLoader 并打包 scalers 信息
+    """组装 TensorDataset、构建 DataLoader 并打包 scaler 元信息。
+
+    将训练/验证/测试三组的 SNP 与归一化表型数据封装为 ``TensorDataset``，
+    创建对应的 ``DataLoader``，并将 scaler 相关信息打包返回，供推理阶段使用。
+
+    Parameters
+    ----------
+    train_snp : np.ndarray
+        训练集 SNP 数据，形状为 ``(n_sample_train, n_feature)``。
+    train_phe_norm : np.ndarray
+        归一化后的训练集表型数据，形状为 ``(n_sample_train, n_pheno, n_time)``。
+    val_snp : np.ndarray
+        验证集 SNP 数据，形状为 ``(n_sample_val, n_feature)``。
+    val_phe_norm : np.ndarray
+        归一化后的验证集表型数据，形状为 ``(n_sample_val, n_pheno, n_time)``。
+    test_snp : np.ndarray
+        测试集 SNP 数据，形状为 ``(n_sample_test, n_feature)``。
+    test_phe_norm : np.ndarray
+        归一化后的测试集表型数据，形状为 ``(n_sample_test, n_pheno, n_time)``。
+    phenotype_names : list[str]
+        表型名称列表。
+    norm_method : str
+        归一化策略名称。
+    pheno_meta : dict
+        表型元信息（如 scaler 实例等），由 ``_apply_normalization`` 返回。
+    batch_size : int
+        每个 DataLoader 的批次大小。
+    num_workers : int
+        DataLoader 的数据加载线程数。
+    device : str
+        训练设备标识（如 ``'cuda'`` 或 ``'cpu'``），用于决定是否启用 ``pin_memory``。
+
+    Returns
+    -------
+    train_loader : DataLoader
+        训练集 DataLoader（shuffle=True）。
+    val_loader : DataLoader
+        验证集 DataLoader（shuffle=False）。
+    test_loader : DataLoader
+        测试集 DataLoader（shuffle=False）。
+    scalers : dict
+        包含 ``phenotype_names``、``norm_method``、``pheno_meta`` 的字典，
+        用于推理阶段的逆归一化。
     """
     # 1. 封装合并数据集
     train_dataset = TensorDataset(to_tensor(train_snp), to_tensor(train_phe_norm))
@@ -86,14 +163,39 @@ def _build_dataloaders_and_scalers(
 
 
 class TFPPDataset:
-    """SNP和表型数据集类"""
+    """TFPP 模型专用数据集，管理 SNP 基因型与多维时序表型的加载与索引。
+
+    从 ``.npy`` 文件加载 SNP 数据（+1 偏移将缺失值 -1 映射为 0），
+    从 ``pheno_dir`` 目录中按表型名称逐个读取 CSV 文件并沿表型维度拼接，
+    最终提供 ``(snp, phenotype)`` 样本对供 DataLoader 使用。
+
+    Parameters
+    ----------
+    snp_file : str
+        SNP 数据文件路径（``.npy`` 格式），加载后形状为 ``(n_sample, n_feature)``。
+    pheno_dir : str
+        表型 CSV 文件存放目录，每个表型对应一个 ``{name}.csv`` 文件，
+        文件形状为 ``(n_sample, n_time_points)``。
+    phenotype_names : list[str]
+        需要加载的表型名称列表，如 ``['RGBVI', 'ExB', 'WI', 'CIVE']``。
+    """
 
     def __init__(self, snp_file: str, pheno_dir: str, phenotype_names: list[str]):
-        """
-        初始化数据集
-        Args:
-            snp_file: SNP数据文件路径(.npy格式)
-            phenotype_names: 选择的表型名称列表,例如['RGBVI', 'ExB', 'WI', 'CIVE']
+        """初始化数据集，加载 SNP 与表型数据。
+
+        Parameters
+        ----------
+        snp_file : str
+            SNP 数据文件路径（``.npy`` 格式）。
+        pheno_dir : str
+            表型 CSV 文件存放目录。
+        phenotype_names : list[str]
+            需要加载的表型名称列表，如 ``['RGBVI', 'ExB', 'WI', 'CIVE']``。
+
+        Raises
+        ------
+        FileNotFoundError
+            当 ``snp_file`` 指向的文件不存在时抛出。
         """
         if not Path(snp_file).exists():
             raise FileNotFoundError(f"SNP文件不存在: {snp_file}")
@@ -108,12 +210,15 @@ class TFPPDataset:
         self.phenotype = self.load_phenotypes()  # [n_sample, n_pheno, n_time_points]
 
     def load_phenotypes(self):
-        """
-        加载并合并所有表型数据(不进行归一化)
-        phenotype_names 表型名称
+        """加载并合并所有表型数据（不进行归一化）。
 
-        Returns:
-            phenotype_data: numpy数组,形状为[n_sample, n_pheno, n_time_points]
+        遍历 ``phenotype_names`` 中的每个表型名称，读取对应 CSV 文件，
+        沿表型维度拼接为统一的三维数组。
+
+        Returns
+        -------
+        pheno_data : np.ndarray
+            合并后的表型数据，形状为 ``(n_sample, n_pheno, n_time_points)``。
         """
         phenotypes = []
 
@@ -148,22 +253,50 @@ def get_dataloader(
     device: str = "cpu",
     num_workers: int = 8,
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
-    """
-    Args:
-        dataset: 数据集
-        batch_size: 批次数量
-        train_ratio: 训练集所占比例
-        test_ratio: 测试集所占比例
-        val_ratio: 验证集所占比例
-        seed: 随机数种子
-        device: 训练设备
-        num_workers: 加载数据的线程数量
-        norm_method: 归一化策略选择
-            - 'global': 整个表型统一归一化
-            - 'timepoint': 每个时间点独立归一化
-            - 'residual_global': 减均值 -> 整个表型归一化
-            - 'residual_timepoint': 减均值 -> 每个时间点独立归一化
-        scaler_type: 缩放器类型 ('zscore', 'minmax', 'robust'). 默认 'zscore'.
+    """根据比例划分数据集并构建训练/验证/测试 DataLoader。
+
+    使用 ``random_split`` 对数据集索引进行互斥划分，然后对表型数据
+    执行归一化（仅用训练集拟合 scaler），最终构建三组 DataLoader。
+
+    Parameters
+    ----------
+    dataset : TFPPDataset
+        TFPP 数据集实例，包含 SNP 和表型数据。
+    batch_size : int
+        每个 DataLoader 的批次大小。
+    norm_method : str
+        归一化策略选择：
+
+        - ``'global'``: 整个表型统一归一化
+        - ``'timepoint'``: 每个时间点独立归一化
+        - ``'residual_global'``: 减均值后整个表型归一化
+        - ``'residual_timepoint'``: 减均值后每个时间点独立归一化
+
+    scaler_type : str
+        缩放器类型（``'zscore'``、``'minmax'``、``'robust'``）。
+    train_ratio : float, optional
+        训练集所占比例，默认 ``0.8``。
+    test_ratio : float, optional
+        测试集所占比例，默认 ``0.1``。
+    val_ratio : float, optional
+        验证集所占比例，默认 ``0.1``。
+    seed : int, optional
+        随机数种子，默认 ``73``。
+    device : str, optional
+        训练设备标识，默认 ``'cpu'``。
+    num_workers : int, optional
+        DataLoader 的数据加载线程数，默认 ``8``。
+
+    Returns
+    -------
+    train_loader : DataLoader
+        训练集 DataLoader（shuffle=True）。
+    val_loader : DataLoader
+        验证集 DataLoader（shuffle=False）。
+    test_loader : DataLoader
+        测试集 DataLoader（shuffle=False）。
+    scalers : dict
+        包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
     # 1. 划分数据集
     snp_data = dataset.snp  # [n_sample, n_feature]
@@ -231,21 +364,48 @@ def get_dataloader_with_kfold(
     scaler_type: str,
     num_workers: int = 4,
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
-    """
-    Args:
-        train_indices: 验证集索引集
-        val_indices：验证集索引集
-        test_indices：索引集
-        dataset: 数据集
-        batch_size: 批次数量
-        device: 训练设备
-        num_workers: 加载数据的线程数量
-        norm_method: 归一化策略选择
-            - 'global': 整个表型统一归一化
-            - 'timepoint': 每个时间点独立归一化
-            - 'residual_global': 减均值 -> 整个表型归一化
-            - 'residual_timepoint': 减均值 -> 每个时间点独立归一化
-        scaler_type: 缩放器类型 ('zscore', 'minmax', 'robust'). 默认 'zscore'.
+    """基于 KFold 预划分的索引构建训练/验证/测试 DataLoader。
+
+    接收外部 KFold 划分好的索引列表，提取对应的 SNP 和表型数据，
+    执行归一化（仅用训练集拟合 scaler）后构建三组 DataLoader。
+
+    Parameters
+    ----------
+    train_indices : list[int]
+        训练集样本索引列表。
+    val_indices : list[int]
+        验证集样本索引列表。
+    test_indices : list[int]
+        测试集样本索引列表。
+    dataset : TFPPDataset
+        TFPP 数据集实例，包含 SNP 和表型数据。
+    batch_size : int
+        每个 DataLoader 的批次大小。
+    device : str
+        训练设备标识（如 ``'cuda'`` 或 ``'cpu'``）。
+    norm_method : str
+        归一化策略选择：
+
+        - ``'global'``: 整个表型统一归一化
+        - ``'timepoint'``: 每个时间点独立归一化
+        - ``'residual_global'``: 减均值后整个表型归一化
+        - ``'residual_timepoint'``: 减均值后每个时间点独立归一化
+
+    scaler_type : str
+        缩放器类型（``'zscore'``、``'minmax'``、``'robust'``）。
+    num_workers : int, optional
+        DataLoader 的数据加载线程数，默认 ``4``。
+
+    Returns
+    -------
+    train_loader : DataLoader
+        训练集 DataLoader（shuffle=True）。
+    val_loader : DataLoader
+        验证集 DataLoader（shuffle=False）。
+    test_loader : DataLoader
+        测试集 DataLoader（shuffle=False）。
+    scalers : dict
+        包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
     # ===================== 1. 划分数据集 =====================
     snp_data = dataset.snp

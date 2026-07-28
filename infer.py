@@ -12,6 +12,7 @@ from utils import denormalize_phenotype, load_scalers
 
 
 def parse_args():
+    """解析推理脚本的命令行参数。"""
     parser = argparse.ArgumentParser(
         description="DynaGS: TFPP 模型预测脚本 (支持外部文件或默认测试集)"
     )
@@ -88,6 +89,7 @@ def parse_args():
 
 
 def predict():
+    """加载模型与归一化器，对 SNP 数据执行推理并导出预测结果 CSV。"""
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     Path("outputs/infer").mkdir(parents=True, exist_ok=True)

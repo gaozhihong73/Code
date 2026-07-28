@@ -29,6 +29,7 @@ _DATA_DIR = Path("dataset/simulated_data")
 
 
 def parse_args():
+    """解析命令行参数。"""
     p = argparse.ArgumentParser(description="导出测试集预测结果为 CSV")
     p.add_argument(
         "--model_dir",
@@ -41,6 +42,7 @@ def parse_args():
 
 
 def _parse_meta(dirname: str) -> dict:
+    """从模型目录名中解析实验参数 (scenario, p, n, h, rep)。"""
     m = _MODEL_DIRNAME_RE.match(dirname)
     if not m:
         raise ValueError(f"无法从目录名 '{dirname}' 解析实验参数")
@@ -67,6 +69,7 @@ def _load_pheno_df(meta: dict) -> pd.DataFrame:
 
 
 def main():
+    """导出测试集预测结果为 CSV 的主入口。"""
     args = parse_args()
     device = args.device
     if device == "cuda" and not __import__("torch").cuda.is_available():

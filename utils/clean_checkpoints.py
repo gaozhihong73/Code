@@ -14,6 +14,7 @@ def find_checkpoint_dirs(root_dir, dry_run=True):
 
 
 def main():
+    """扫描并清理目录树中的所有 .ipynb_checkpoints 目录。"""
     target_dir = sys.argv[1] if len(sys.argv) > 1 else "."
     dry_run = True  # 默认先预览
 

@@ -3,15 +3,32 @@ from torch import nn
 
 
 class MSEPCCLoss(nn.Module):
+    """MSE + Pearson 相关系数 (PCC) 联合损失函数。
+
+    在均方误差 (MSE) 的基础上，可选地加入 PCC 损失以增强模型对样本排序的拟合能力。
+    PCC 在 batch 维度计算：对于每个 (pheno, time) 组合，衡量预测与真值在样本间的线性相关程度。
+    """
+
     def __init__(self, pcc_weight=0.0):
+        """初始化 MSEPCCLoss。"""
         super().__init__()
         self.pcc_weight = pcc_weight
         self.mse = nn.MSELoss()
 
     def forward(self, pred, target):
-        """
-        pred: [Batch, Phenotype, Time]
-        target: [Batch, Phenotype, Time]
+        """计算 MSE + 可选 PCC 联合损失。
+
+        Parameters
+        ----------
+        pred : torch.Tensor
+            模型预测值, shape ``(batch_size, n_pheno, n_time)``。
+        target : torch.Tensor
+            真实标签, shape ``(batch_size, n_pheno, n_time)``。
+
+        Returns
+        -------
+        torch.Tensor
+            标量损失值 ``mse_loss + pcc_weight * pcc_loss``。
         """
         # 1. MSE Loss (数值准确性)
         mse_loss = self.mse(pred, target)
@@ -57,16 +74,26 @@ class MSEOffsetLoss(nn.Module):
     """
 
     def __init__(self, offset_weight: float = 0.5, pcc_weight: float = 0.0):
+        """初始化 MSEOffsetLoss。"""
         super().__init__()
         self.offset_weight = offset_weight
         self.pcc_weight = pcc_weight
         self.mse = nn.MSELoss()
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            pred:   [B, P, T]
-            target: [B, P, T]
+        """计算 MSE + 个体偏移 MSE + 可选 PCC 联合损失。
+
+        Parameters
+        ----------
+        pred : torch.Tensor
+            模型预测值, shape ``(batch_size, n_pheno, n_time)``。
+        target : torch.Tensor
+            真实标签, shape ``(batch_size, n_pheno, n_time)``。
+
+        Returns
+        -------
+        torch.Tensor
+            标量损失值。
         """
         # 1. 逐点 MSE: 保留时间结构信息
         mse_loss = self.mse(pred, target)

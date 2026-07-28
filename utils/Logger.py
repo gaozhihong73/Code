@@ -22,6 +22,25 @@ class Logger:
         backup_count: int = 5,
         encoding: str = "utf-8",
     ):
+        """初始化双输出日志器。
+
+        Parameters
+        ----------
+        log_filename : str
+            日志文件路径，目录不存在时自动创建。
+        file_level : str, optional
+            文件日志级别, 默认 ``"DEBUG"``。
+        console_level : str, optional
+            控制台日志级别, 默认 ``"INFO"``。
+        unique : bool, optional
+            是否在文件名中追加时间戳以避免覆盖, 默认 ``False``。
+        max_bytes : int or None, optional
+            单个日志文件的最大字节数; 非 None 时启用 RotatingFileHandler, 默认 ``None``。
+        backup_count : int, optional
+            滚动保留的旧日志文件数, 默认 ``5``。
+        encoding : str, optional
+            文件编码, 默认 ``"utf-8"``。
+        """
         self.file_level = self._get_level(file_level)
         self.console_level = self._get_level(console_level)
         self.max_bytes = max_bytes

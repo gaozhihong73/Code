@@ -5,6 +5,7 @@ from trainer import TFPPTrainer
 
 
 def parse_args():
+    """解析命令行参数并返回 argparse Namespace 对象。"""
     parser = argparse.ArgumentParser(description="Train TFPP model")
 
     parser.add_argument(
@@ -91,6 +92,7 @@ def parse_args():
 
 
 def main():
+    """TFPP 模型训练入口：解析参数、构建配置、初始化训练器并执行训练。"""
     # 1. 获取命令行参数
     args = parse_args()
 

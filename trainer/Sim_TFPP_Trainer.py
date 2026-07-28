@@ -40,6 +40,7 @@ class SimTFPPTrainer:
     """模拟数据 TFPP 训练器 (常规训练, 无 KFold)"""
 
     def __init__(self, config: SimTFPPConfig):
+        """初始化训练器并构建数据集与模型。"""
         # 保存配置
         self.config = config
 
@@ -117,6 +118,7 @@ class SimTFPPTrainer:
         self.model = self._create_model()
 
     def _create_model(self):
+        """获取模型。"""
         return TFPP(
             snp_dim=self.snp_dim,
             d_model=self.d_model,
@@ -132,6 +134,7 @@ class SimTFPPTrainer:
         ).to(self.device)
 
     def _create_dataset(self):
+        """获取数据集对象。"""
         return SimTFPPDataset(
             train_snp_csv=self.config.train_snp_csv,
             train_pheno_csv=self.config.train_pheno_csv,
@@ -145,6 +148,7 @@ class SimTFPPTrainer:
         )
 
     def _create_optimizer_and_scheduler(self):
+        """创建优化器与学习率调度器。"""
         base_lr = self.lr
         wide_lr_scale = 1.0
         wide_wd_scale = 1.0
@@ -199,6 +203,7 @@ class SimTFPPTrainer:
         return optimizer, scheduler
 
     def _create_loss(self):
+        """根据配置创建损失函数。"""
         if self.loss_type == "mse":
             return nn.MSELoss()
         elif self.loss_type == "mse_pcc":
@@ -212,6 +217,22 @@ class SimTFPPTrainer:
             raise ValueError(f"未知 loss_type: {self.loss_type}")
 
     def _train_epoch(self, train_loader, optimizer, criterion):
+        """训练一个 epoch 并返回损失与指标。
+
+        Parameters
+        ----------
+        train_loader : DataLoader
+            训练数据加载器。
+        optimizer : optim.Optimizer
+            优化器。
+        criterion : nn.Module
+            损失函数。
+
+        Returns
+        -------
+        tuple[float, dict[str, float]]
+            平均训练损失和评估指标字典。
+        """
         self.model.train()
         train_loss = 0.0
         num_batches = len(train_loader)
@@ -283,6 +304,20 @@ class SimTFPPTrainer:
         return train_loss / num_batches, phenotype_metrics_avg
 
     def _validate_epoch(self, val_loader, criterion):
+        """验证一个 epoch 并返回损失与各表型指标。
+
+        Parameters
+        ----------
+        val_loader : DataLoader
+            验证数据加载器。
+        criterion : nn.Module
+            损失函数。
+
+        Returns
+        -------
+        tuple[float, dict[str, dict[str, float]], dict[str, float]]
+            平均验证损失、各表型指标字典和综合平均指标字典。
+        """
         self.model.eval()
         num_batches = len(val_loader)
         val_loss = 0.0
@@ -310,6 +345,20 @@ class SimTFPPTrainer:
         return val_loss / num_batches, phenotype_metrics, phenotype_metrics_avg
 
     def _evaluate_test_set(self, test_loader, scalers):
+        """在测试集上进行最终评估（使用反归一化后的数据）。
+
+        Parameters
+        ----------
+        test_loader : DataLoader
+            测试数据加载器。
+        scalers : dict
+            归一化器字典。
+
+        Returns
+        -------
+        dict[str, Any]
+            包含归一化和反归一化两组评估结果的字典。
+        """
         self.model.eval()
         all_preds = []
         all_targets = []
@@ -349,6 +398,7 @@ class SimTFPPTrainer:
         }
 
     def _train_regular(self) -> dict[str, Any]:
+        """常规训练模式（单次训练验证测试划分）。"""
         self.logger.info("=" * 80)
         self.logger.info("模拟数据常规训练")
         self.logger.info("=" * 80)
@@ -515,6 +565,7 @@ class SimTFPPTrainer:
         final_lr,
         test_results,
     ):
+        """保存模型权重及完整的训练元数据。"""
         # 1. 模型权重
         model_path = self.best_model_save_dir / "best_model.pt"
         cpu_model_state = {k: v.cpu().clone() for k, v in best_model_state.items()}
@@ -600,6 +651,7 @@ class SimTFPPTrainer:
         return self._train_regular()
 
     def _log_configuration(self) -> None:
+        """记录配置信息。"""
         self.logger.info("训练配置:")
         self.logger.info(f"    实验名称: {self.exp_name}")
         self.logger.info(f"    实验组: {self.exp_group}")

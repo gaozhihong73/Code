@@ -70,6 +70,19 @@ def load_microbe_phenotypes(phenotype_names: list[str]) -> np.ndarray:
 
 
 def verify_column_mean_leakage(PHENOTYPE_NAMES, phenotype_data):
+    """检测列均值预测是否存在信息泄露。
+
+    对每个表型的每个时间点列，使用训练集列均值作为所有样本的预测值，
+    计算验证集和测试集上的 R2/PCC/MSE 指标。若测试集上出现高 R2 或高 PCC，
+    则说明该时间点列方差极小，仅用列均值即可获得高性能，存在潜在泄露风险。
+
+    Parameters
+    ----------
+    PHENOTYPE_NAMES : list[str]
+        表型名称列表。
+    phenotype_data : np.ndarray
+        合并后的表型数据, shape ``(n_samples, n_pheno, n_time)``。
+    """
     seed = 73
     print("=" * 80)
     print(f"检测列均值预测的性能 (Seed = {seed})")

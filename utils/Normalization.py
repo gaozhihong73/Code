@@ -8,12 +8,14 @@ from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
 
 
 def save_scalers(scalers, save_path):
-    """
-    保存sklearn的scaler对象到文件
+    """保存 sklearn 的 scaler 对象到文件。
 
-    Args:
-        scalers: scaler字典
-        save_path: 保存路径(.pkl格式)
+    Parameters
+    ----------
+    scalers : dict
+        scaler 字典。
+    save_path : str
+        保存路径 (``.pkl`` 格式), 目录不存在时自动创建。
     """
     dir = os.path.dirname(save_path)
     if dir and not os.path.exists(dir):
@@ -23,14 +25,17 @@ def save_scalers(scalers, save_path):
 
 
 def load_scalers(load_path):
-    """
-    从文件加载sklearn的scaler对象
+    """从文件加载 sklearn 的 scaler 对象。
 
-    Args:
-        load_path: scaler文件路径(.pkl格式)
+    Parameters
+    ----------
+    load_path : str
+        scaler 文件路径 (``.pkl`` 格式)。
 
-    Returns:
-        scalers: scaler字典
+    Returns
+    -------
+    dict
+        scaler 字典。
     """
     with open(load_path, "rb") as f:
         scalers = pickle.load(f)
@@ -38,9 +43,28 @@ def load_scalers(load_path):
 
 
 def apply_global_norm(train, val, test, phenotype_names, ScalerClass):
-    """
-    策略1: 按照整个表型归一化 (Global per Phenotype)
-    逻辑: 将该表型下所有时间点的数据视为同一个分布，计算一个全局的 mean/std。
+    """策略1: 按照整个表型归一化 (Global per Phenotype)。
+
+    将该表型下所有时间点的数据视为同一个分布，计算一个全局的 mean/std。
+
+    Parameters
+    ----------
+    train : np.ndarray
+        训练集, shape ``(n_train, n_pheno, n_time)``。
+    val : np.ndarray
+        验证集, shape ``(n_val, n_pheno, n_time)``。
+    test : np.ndarray
+        测试集, shape ``(n_test, n_pheno, n_time)``。
+    phenotype_names : list[str]
+        表型名称列表。
+    ScalerClass : type
+        sklearn scaler 类 (如 ``StandardScaler``)。
+
+    Returns
+    -------
+    tuple
+        ``(train_norm, val_norm, test_norm, scalers_package)``，
+        其中 ``scalers_package`` 为 ``{"scalers": {name: scaler}}``。
     """
     scalers_dict = {}
 
@@ -77,10 +101,29 @@ def apply_global_norm(train, val, test, phenotype_names, ScalerClass):
 
 
 def apply_timepoint_norm(train, val, test, phenotype_names, ScalerClass):
-    """
-    策略2 (优化版): 按表型中的每个时间点归一化 (Per Timepoint)
-    逻辑: 利用 sklearn 的向量化特性，直接对 [N, T] 矩阵拟合，
-          自动为每一列(时间点)计算独立的 mean/std。
+    """策略2 (优化版): 按表型中的每个时间点归一化 (Per Timepoint)。
+
+    利用 sklearn 的向量化特性，直接对 ``[N, T]`` 矩阵拟合，
+    自动为每一列 (时间点) 计算独立的 mean/std。
+
+    Parameters
+    ----------
+    train : np.ndarray
+        训练集, shape ``(n_train, n_pheno, n_time)``。
+    val : np.ndarray
+        验证集, shape ``(n_val, n_pheno, n_time)``。
+    test : np.ndarray
+        测试集, shape ``(n_test, n_pheno, n_time)``。
+    phenotype_names : list[str]
+        表型名称列表。
+    ScalerClass : type
+        sklearn scaler 类 (如 ``StandardScaler``)。
+
+    Returns
+    -------
+    tuple
+        ``(train_norm, val_norm, test_norm, scalers_package)``，
+        其中 ``scalers_package`` 为 ``{"scalers": {name: scaler}}``。
     """
     scalers_dict = {}
 
@@ -110,8 +153,29 @@ def apply_timepoint_norm(train, val, test, phenotype_names, ScalerClass):
 
 
 def apply_residual_global_norm(train, val, test, phenotype_names, ScalerClass):
-    """
-    策略3: 先减去均值再按照整个表型归一化 (Residual + Global)
+    """策略3: 先减去均值再按照整个表型归一化 (Residual + Global)。
+
+    先用训练集计算每个时间点的全局均值曲线，从所有数据中减去该曲线得到残差，
+    再对残差应用 Global 归一化。
+
+    Parameters
+    ----------
+    train : np.ndarray
+        训练集, shape ``(n_train, n_pheno, n_time)``。
+    val : np.ndarray
+        验证集, shape ``(n_val, n_pheno, n_time)``。
+    test : np.ndarray
+        测试集, shape ``(n_test, n_pheno, n_time)``。
+    phenotype_names : list[str]
+        表型名称列表。
+    ScalerClass : type
+        sklearn scaler 类 (如 ``StandardScaler``)。
+
+    Returns
+    -------
+    tuple
+        ``(train_norm, val_norm, test_norm, scalers_package)``，
+        其中 ``scalers_package`` 包含 ``"scalers"`` 和 ``"mean_curve"``。
     """
     # 1. 计算均值曲线 (只用训练集) [1, P, T]
     mean_curve = np.mean(train, axis=0, keepdims=True)
@@ -139,9 +203,25 @@ def apply_residual_global_norm(train, val, test, phenotype_names, ScalerClass):
 def denormalize_phenotype(
     normalized_data: np.ndarray | torch.Tensor, scalers_package: dict
 ) -> torch.Tensor:
-    """
-    自动根据 scalers_package 中的 'norm_method' 选择正确的反归一化路径。
-    支持输入形状: [B, P, T] (批量) 或 [P, T] (单样本)。
+    """自动根据 scalers_package 中的 ``norm_method`` 选择正确的反归一化路径。
+
+    支持 ``global``、``timepoint``、``residual_global`` 等策略，
+    自动检测并对残差类方法恢复均值曲线。
+
+    Parameters
+    ----------
+    normalized_data : np.ndarray or torch.Tensor
+        归一化后的数据, shape ``(batch_size, n_pheno, n_time)`` (批量)
+        或 ``(n_pheno, n_time)`` (单样本, 自动升维处理)。
+    scalers_package : dict
+        包含 ``"norm_method"``、``"pheno_meta"``、``"phenotype_names"`` 的字典,
+        由归一化函数返回。
+
+    Returns
+    -------
+    torch.Tensor
+        反归一化后的数据, dtype ``float32``; 输出维度与输入一致
+        (单样本输入则返回 ``(n_pheno, n_time)``)。
     """
     # 1. 类型转换与形状检查
     if isinstance(normalized_data, torch.Tensor):

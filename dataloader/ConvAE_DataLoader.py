@@ -7,8 +7,25 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 
 class ConvAEDataset(Dataset):
-    """
-    智能分块数据集类 (集成归一化与填充处理)
+    """ConvAE 模型专用数据集，集成滑动窗口分块、归一化与动态填充处理。
+
+    从 ``.npy`` 文件加载 SNP 数据（+1 偏移将缺失值 -1 映射为 0），
+    通过滑动窗口将长序列切分为多个等长子块（``chunk_size`` 窗口，
+    ``overlap`` 重叠），不足部分自动零填充。同时从 CSV 文件加载表型数据
+    并执行全局 Z-score 归一化。
+
+    Parameters
+    ----------
+    snp_file : str
+        SNP 数据文件路径（``.npy`` 格式），加载后形状为 ``(n_sample, n_feature)``。
+    pheno_dir : str
+        表型 CSV 文件存放目录，每个表型对应一个 ``{name}.csv`` 文件。
+    phenotype_names : list[str]
+        需要加载的表型名称列表。
+    chunk_size : int, optional
+        每个滑动窗口的 SNP 位点数（窗口大小），默认 ``12000``。
+    overlap : int, optional
+        相邻窗口之间的重叠位点数，默认 ``2000``。
     """
 
     def __init__(
@@ -19,19 +36,25 @@ class ConvAEDataset(Dataset):
         chunk_size: int = 12000,
         overlap: int = 2000,
     ):
-        """
-        参数:
-        ------------
-        snp_file: str
-            SNP数据文件路径 (.npy格式)
-        pheno_dir:
-            表型数据存放目录
-        phenotype_names: np.ndarray
-            要使用的表型名称
-        chunk_size: int
-            每个分块的 SNP 位点数（窗口大小）
-        overlap: int
-            相邻分块之间的重叠位点数
+        """初始化数据集，加载 SNP 数据并执行滑动窗口分块与动态填充。
+
+        Parameters
+        ----------
+        snp_file : str
+            SNP 数据文件路径（``.npy`` 格式）。
+        pheno_dir : str
+            表型 CSV 文件存放目录。
+        phenotype_names : list[str]
+            需要加载的表型名称列表。
+        chunk_size : int, optional
+            每个滑动窗口的 SNP 位点数（窗口大小），默认 ``12000``。
+        overlap : int, optional
+            相邻窗口之间的重叠位点数，默认 ``2000``。
+
+        Raises
+        ------
+        FileNotFoundError
+            当 ``snp_file`` 指向的文件不存在时抛出。
         """
         # 1. 检查文件是否存在
         if not Path(snp_file).exists():
@@ -89,12 +112,15 @@ class ConvAEDataset(Dataset):
         self.phenotype_norm = self.apply_global_zscore_norm()  # 归一化表型
 
     def load_phenotypes(self):
-        """
-        加载并合并所有表型数据(进行归一化)
-        phenotype_names 表型名称
+        """加载并合并所有表型数据（不进行归一化）。
 
-        Returns:
-            phenotype_data: numpy数组,形状为[n_sample, n_pheno, n_time_points]
+        遍历 ``phenotype_names`` 中的每个表型名称，读取对应 CSV 文件，
+        沿表型维度拼接为统一的三维数组。
+
+        Returns
+        -------
+        pheno_data : np.ndarray
+            合并后的表型数据，形状为 ``(n_sample, n_pheno, n_time_points)``。
         """
         phenotypes = []
 
@@ -109,14 +135,16 @@ class ConvAEDataset(Dataset):
         return pheno_data
 
     def apply_global_zscore_norm(self):
-        """
-        对表型数据进行全局的 Z-score 归一化 (Global Z-score per Phenotype)。
+        """对表型数据执行逐表型的全局 Z-score 归一化。
 
-        参数:
-            phenotypes (np.ndarray): 形状为 [样本数量(N), 表型数量(P), 时间点数(T)] 的表型数据。
+        对每个表型独立计算其在所有样本和时间点上的全局均值与标准差，
+        然后执行 ``(x - mean) / std`` 标准化。
 
-        返回:
-            pheno_norm (np.ndarray): 归一化后具有相同形状 [N, P, T] 的表型数据。
+        Returns
+        -------
+        pheno_norm : np.ndarray
+            归一化后的表型数据，形状与 ``self.phenotype`` 相同，
+            即 ``(n_sample, n_pheno, n_time_points)``。
         """
         # 深拷贝数据，防止直接修改传入的原始数组引用的数据
         pheno_norm = np.copy(self.phenotype)
@@ -145,9 +173,11 @@ class ConvAEDataset(Dataset):
         return pheno_norm
 
     def __len__(self):
+        """返回数据集中的样本数量。"""
         return self.snp.shape[0]
 
     def __getitem__(self, idx):
+        """获取单个样本，使用 ``unfold`` 将 SNP 序列切分为多个滑动窗口子块。"""
         sample_snps = self.snp[idx]
         # 用 unfold 动态切块
         x_chunks = sample_snps.unfold(
@@ -167,8 +197,32 @@ def get_mae_dataloader(
     seed: int = 73,
     num_workers: int = 8,
 ) -> tuple[DataLoader, DataLoader]:
-    """
-    参考 TFPP_DataLoader.py 逻辑，利用随机索引安全划分 DataLoader
+    """按指定比例划分训练/验证集并构建 DataLoader。
+
+    使用 ``random_split`` 对 ``ConvAEDataset`` 进行互斥划分，
+    创建训练集（shuffle=True）和验证集（shuffle=False）的 DataLoader。
+
+    Parameters
+    ----------
+    dataset : ConvAEDataset
+        ConvAE 数据集实例，包含已分块和归一化的 SNP 与表型数据。
+    batch_size : int, optional
+        每个 DataLoader 的批次大小，默认 ``32``。
+    train_ratio : float, optional
+        训练集所占比例，默认 ``0.8``。
+    val_ratio : float, optional
+        验证集所占比例，默认 ``0.2``。
+    seed : int, optional
+        随机数种子，默认 ``73``。
+    num_workers : int, optional
+        DataLoader 的数据加载线程数，默认 ``8``。
+
+    Returns
+    -------
+    train_loader : DataLoader
+        训练集 DataLoader（shuffle=True）。
+    val_loader : DataLoader
+        验证集 DataLoader（shuffle=False）。
     """
 
     generator = torch.Generator().manual_seed(seed)

@@ -18,12 +18,10 @@ from utils import Logger
 
 
 class ConvAETrainer:
-    """
-    ConvAE 训练器
-    集成 TFPP 风格的日志保存、Curriculum Learning (课程学习) 与指标追踪。
-    """
+    """ConvAE 训练器，集成 TFPP 风格的日志保存、Curriculum Learning (课程学习) 与指标追踪。"""
 
     def __init__(self, config: ConvAEConfig):
+        """初始化训练器并构建数据集与模型。"""
         # 保存配置
         self.config = config
 
@@ -99,10 +97,12 @@ class ConvAETrainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.is_cuda)
 
     def _create_model(self) -> ConvAE:
+        """获取模型。"""
         # 基于 DataLoader 计算出的切块数量，初始化 ConvAE
         return ConvAE(num_chunks=self.dataset.num_chunks).to(self.device)
 
     def _create_dataset(self) -> ConvAEDataset:
+        """获取数据集对象。"""
         return ConvAEDataset(
             snp_file=self.snp_file,
             pheno_dir=self.pheno_dir,
@@ -149,6 +149,20 @@ class ConvAETrainer:
     def _train_epoch(
         self, train_loader: DataLoader, optimizer: optim.Optimizer
     ) -> tuple[float, float, float]:  # 传入 scheduler 以便按 step 更新
+        """训练一个 epoch 并返回各项损失。
+
+        Parameters
+        ----------
+        train_loader : DataLoader
+            训练数据加载器。
+        optimizer : optim.Optimizer
+            优化器。
+
+        Returns
+        -------
+        tuple[float, float, float]
+            平均总损失、平均重建损失和平均表型损失。
+        """
         self.model.train()
         num_batches = len(train_loader)
         metrics = {"total": 0.0, "recon": 0.0, "pheno": 0.0}
@@ -217,6 +231,18 @@ class ConvAETrainer:
         )
 
     def _validate_epoch(self, val_loader: DataLoader) -> tuple[float, float, float]:
+        """验证一个 epoch 并返回各项损失。
+
+        Parameters
+        ----------
+        val_loader : DataLoader
+            验证数据加载器。
+
+        Returns
+        -------
+        tuple[float, float, float]
+            平均总损失、平均重建损失和平均表型损失。
+        """
         self.model.eval()
         num_batches = len(val_loader)
         metrics = {"total": 0.0, "recon": 0.0, "pheno": 0.0}
@@ -256,6 +282,7 @@ class ConvAETrainer:
     # 主训练流程与文件保存 (TFPP 风格)
     # ==========================================================================
     def train(self):
+        """ConvAE 主训练流程。"""
         self.logger.info("=" * 80)
         self.logger.info("开始 ConvAE 训练")
         self.logger.info("=" * 80)

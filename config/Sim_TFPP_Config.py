@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 
 class SimTFPPConfig(BaseModel):
-    """模拟数据实验配置类"""
+    """模拟数据 TFPP 表型预测模型的训练配置，支持预划分的基因型/表型 CSV 输入。"""
 
     # ============ 实验标识 ============
     exp_name: str = Field(
@@ -107,21 +107,26 @@ class SimTFPPConfig(BaseModel):
     # ============ 输出目录属性 ============
     @property
     def output_dir(self) -> str:
+        """训练输出文件的保存总目录"""
         return f"outputs/sim_tfpp/{self.exp_name}"
 
     @property
     def best_model_save_dir(self) -> str:
+        """训练好模型的保存目录"""
         return f"{self.output_dir}/models"
 
     @property
     def training_history_save_dir(self) -> str:
+        """训练历史文件的保存目录"""
         return f"{self.output_dir}/training_history"
 
     @property
     def scaler_save_dir(self) -> str:
+        """表型的归一化器保存目录"""
         return f"{self.output_dir}/scalers"
 
     @property
     def log_file(self) -> str:
+        """日志文件路径"""
         log_name = self.exp_name.split("/")[-1]
         return f"{self.output_dir}/{log_name}.log"

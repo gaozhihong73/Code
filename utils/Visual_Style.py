@@ -20,13 +20,17 @@ ContextType = Literal["paper", "notebook", "talk", "poster"]
 def set_style(
     context: ContextType = "paper", font_scale: float = 1.2, palette: str = "deep"
 ):
-    """
-    统一初始化绘图风格
+    """统一初始化绘图风格。
 
-    参数:
-        context (str): seaborn 上下文, 可选 'paper' (论文), 'notebook', 'talk', 'poster'
-        font_scale (float): 字体缩放比例，默认 1.2 适合大多数论文插图
-        palette (str): 配色方案
+    Parameters
+    ----------
+    context : str, optional
+        seaborn 上下文, 可选 ``"paper"`` (论文)、``"notebook"``、
+        ``"talk"``、``"poster"``, 默认 ``"paper"``。
+    font_scale : float, optional
+        字体缩放比例, 默认 ``1.2`` 适合大多数论文插图。
+    palette : str, optional
+        配色方案, 默认 ``"deep"``。
     """
 
     # --- A. 基础字体设置 (核心需求: Times New Roman) ---

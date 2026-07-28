@@ -33,21 +33,29 @@ def _load_pheno_csv(csv_path: str) -> np.ndarray:
 
 
 def _dc_sis_screen(snp_train, pheno_train, k, verbose=True):
-    """DC-SIS 特征筛选 (距离相关系数)
+    """DC-SIS 特征筛选（距离相关系数）。
 
-    仅用训练集计算每个 SNP 与表型 Y 的距离相关系数, 返回 top-k SNP 列索引。
-    利用 SNP 取值仅为 {0,1,2} 的特性, 用矩阵-向量积 + 计数闭式代替 N×N 矩阵分配,
-    O(N) per SNP, 适合 P>>N 场景。
+    仅用训练集计算每个 SNP 与表型 Y 的距离相关系数，返回 top-k SNP 列索引。
+    利用 SNP 取值仅为 ``{0, 1, 2}`` 的特性，用矩阵-向量积 + 计数闭式代替
+    N x N 矩阵分配，O(N) per SNP，适合 P >> N 场景。
 
-    Args:
-        snp_train:    [N, P] float32 训练集基因型 (0/1/2)
-        pheno_train:  [N, 1, T] float32 训练集表型
-        k:            int, 要保留的 SNP 数目
-        verbose:      bool, 打印进度
+    Parameters
+    ----------
+    snp_train : np.ndarray
+        训练集基因型矩阵，形状为 ``(n_sample, n_snp)``，取值 ``{0, 1, 2}``。
+    pheno_train : np.ndarray
+        训练集表型数据，形状为 ``(n_sample, 1, n_time)``。
+    k : int
+        要保留的 SNP 数目。
+    verbose : bool, optional
+        是否打印筛选进度与统计信息，默认 ``True``。
 
-    Returns:
-        indices: [k] int64, 排序后的列索引 (dcor 从大到小)
-        dcor:    [P] float32, 每个 SNP 的距离相关系数
+    Returns
+    -------
+    indices : np.ndarray
+        排序后的列索引，形状为 ``(k,)``，dtype ``int64``，按 dcor 从大到小排列。
+    dcor : np.ndarray
+        每个 SNP 的距离相关系数，形状为 ``(n_snp,)``，dtype ``float32``。
     """
     N, P = snp_train.shape
     y_2d = pheno_train.reshape(N, -1)  # [N, T]
@@ -162,26 +170,36 @@ def _rint_transform(x):
 
 
 def _gwas_screen(snp_train, pheno_train, k, n_pcs=5, use_rint=True, verbose=True):
-    """向量化 GWAS 特征筛选 (动态性状 + PCA 协变量 + min-P 策略)
+    """向量化 GWAS 特征筛选（动态性状 + PCA 协变量 + min-P 策略）。
 
-    移植自 dyn_screen_info.R 的 GWAS 逻辑, 使用 Frisch-Waugh-Lovell 定理
-    将逐 SNP 独立 OLS 回归转换成全 P 维向量化线性代数运算, 大幅提速。
+    移植自 ``dyn_screen_info.R`` 的 GWAS 逻辑，使用 Frisch-Waugh-Lovell 定理
+    将逐 SNP 独立 OLS 回归转换成全 P 维向量化线性代数运算，大幅提速。
 
-    对每个 SNP × 3 个性状 (Mean / AUC / Slope) 计算 OLS P 值
-    (校正前 5 个 PCA 主成分协变量), 对每个 SNP 取性状间最小 P 值,
+    对每个 SNP x 3 个性状（Mean / AUC / Slope）计算 OLS P 值
+    （校正前 ``n_pcs`` 个 PCA 主成分协变量），对每个 SNP 取性状间最小 P 值，
     选出 min-P 最小的 top-k SNPs。
 
-    Args:
-        snp_train:    [N, P] float32 训练集基因型 (0/1/2)
-        pheno_train:  [N, 1, T] float32 训练集表型
-        k:            int, 保留 SNP 数
-        n_pcs:        PCA 主成分个数 (作为协变量)
-        use_rint:     是否对性状做 RINT 变换
-        verbose:      打印进度
+    Parameters
+    ----------
+    snp_train : np.ndarray
+        训练集基因型矩阵，形状为 ``(n_sample, n_snp)``，取值 ``{0, 1, 2}``。
+    pheno_train : np.ndarray
+        训练集表型数据，形状为 ``(n_sample, 1, n_time)``。
+    k : int
+        保留的 SNP 数目。
+    n_pcs : int, optional
+        PCA 主成分个数，作为群体结构校正协变量，默认 ``5``。
+    use_rint : bool, optional
+        是否对性状做秩次逆正态变换（RINT），默认 ``True``。
+    verbose : bool, optional
+        是否打印筛选进度与统计信息，默认 ``True``。
 
-    Returns:
-        indices: [k] int64, 按 min-P 从小到大排序的列索引
-        min_p:   [P] float64, 每个 SNP 的最小 P 值
+    Returns
+    -------
+    indices : np.ndarray
+        按 min-P 从小到大排序的列索引，形状为 ``(k,)``，dtype ``int64``。
+    min_p : np.ndarray
+        每个 SNP 的最小 P 值，形状为 ``(n_snp,)``，dtype ``float64``。
     """
     N, P = snp_train.shape
     y_2d = pheno_train.reshape(N, -1)  # [N, T]
@@ -266,15 +284,38 @@ def _gwas_screen(snp_train, pheno_train, k, n_pcs=5, use_rint=True, verbose=True
 
 
 class SimTFPPDataset:
-    """
-    模拟数据集 (预划分 Train/Val/Test)
+    """模拟数据专用数据集（预划分 Train/Val/Test）。
 
-    训练实际使用的是已划分好的三组数组: snp_train/val/test 与 pheno_train/val/test。
+    与 :class:`TFPPDataset` 不同，本类直接加载已划分好的三组 SNP 与表型 CSV 文件，
+    无需 ``random_split`` 或 KFold 划分。V1..V20 视为同一表型 ``sim_pheno``
+    的 20 个时间点。
 
-    双重特征筛选 (仅在训练集计算, 列索引应用到 val/test, 避免数据泄露):
-    - DC-SIS 筛选 (screen_k): 用距离相关系数筛 top-k 个 SNP
-    - GWAS 筛选 (gwas_k): 用 OLS+PCA 协变量校正的 min-P 筛 top-k 个 SNP
-    - 最终取两者并集作为输入特征
+    支持双重特征筛选（仅在训练集计算，列索引取并集应用到 val/test，避免数据泄露）：
+
+    - **DC-SIS 筛选** (``screen_k``): 基于距离相关系数筛 top-k 个 SNP。
+    - **GWAS 筛选** (``gwas_k``): 基于 OLS + PCA 协变量校正的 min-P 筛 top-k 个 SNP。
+    - 最终取两者并集作为模型输入特征。
+
+    Parameters
+    ----------
+    train_snp_csv : str
+        训练集基因型 CSV 文件路径。
+    train_pheno_csv : str
+        训练集表型 CSV 文件路径。
+    val_snp_csv : str
+        验证集基因型 CSV 文件路径。
+    val_pheno_csv : str
+        验证集表型 CSV 文件路径。
+    test_snp_csv : str
+        测试集基因型 CSV 文件路径。
+    test_pheno_csv : str
+        测试集表型 CSV 文件路径。
+    phenotype_names : list[str]
+        表型名称列表，默认 ``['sim_pheno']``。
+    screen_k : int, optional
+        DC-SIS 筛选保留的 SNP 数目，设为 ``0`` 则跳过，默认 ``100``。
+    gwas_k : int, optional
+        GWAS 筛选保留的 SNP 数目，设为 ``0`` 则跳过，默认 ``100``。
     """
 
     def __init__(
@@ -289,6 +330,36 @@ class SimTFPPDataset:
         screen_k: int = 100,
         gwas_k: int = 100,
     ):
+        """初始化模拟数据集，加载预划分的 SNP/表型 CSV 并执行双重特征筛选。
+
+        Parameters
+        ----------
+        train_snp_csv : str
+            训练集基因型 CSV 文件路径。
+        train_pheno_csv : str
+            训练集表型 CSV 文件路径。
+        val_snp_csv : str
+            验证集基因型 CSV 文件路径。
+        val_pheno_csv : str
+            验证集表型 CSV 文件路径。
+        test_snp_csv : str
+            测试集基因型 CSV 文件路径。
+        test_pheno_csv : str
+            测试集表型 CSV 文件路径。
+        phenotype_names : list[str]
+            表型名称列表，若为 ``None`` 则默认 ``['sim_pheno']``。
+        screen_k : int, optional
+            DC-SIS 筛选保留的 SNP 数目，默认 ``100``。
+        gwas_k : int, optional
+            GWAS 筛选保留的 SNP 数目，默认 ``100``。
+
+        Raises
+        ------
+        FileNotFoundError
+            当任一 CSV 文件路径不存在时抛出。
+        ValueError
+            当各 split 的 SNP 维度或时间点数不一致时抛出。
+        """
         if phenotype_names is None:
             phenotype_names = ["sim_pheno"]
 
@@ -388,6 +459,7 @@ class SimTFPPDataset:
             self._screened_indices = None
 
     def __len__(self):
+        """返回训练集中的样本数量。"""
         return self.snp_train.shape[0]
 
 
@@ -399,15 +471,36 @@ def get_sim_dataloader(
     num_workers: int = 4,
     device: str = "cpu",
 ):
-    """基于预划分的 train/val/test 直接构建 DataLoader
+    """基于预划分的 train/val/test 数据构建 DataLoader。
 
-    Args:
-        dataset: SimTFPPDataset 实例
-        batch_size: 批次大小
-        norm_method: 归一化策略 (global / timepoint / residual_global)
-        scaler_type: 缩放器 (zscore / minmax / robust)
-        num_workers: DataLoader 工作进程数
-        device: 训练设备
+    直接使用 ``SimTFPPDataset`` 中已划分好的三组 SNP 与表型数组，
+    对表型执行归一化（仅用训练集拟合 scaler）后构建三组 DataLoader。
+
+    Parameters
+    ----------
+    dataset : SimTFPPDataset
+        模拟数据集实例，包含预划分的 SNP 与表型数据。
+    batch_size : int
+        每个 DataLoader 的批次大小。
+    norm_method : str
+        归一化策略（``'global'`` / ``'timepoint'`` / ``'residual_global'``）。
+    scaler_type : str
+        缩放器类型（``'zscore'`` / ``'minmax'`` / ``'robust'``）。
+    num_workers : int, optional
+        DataLoader 的工作进程数，默认 ``4``。
+    device : str, optional
+        训练设备标识，默认 ``'cpu'``。
+
+    Returns
+    -------
+    train_loader : DataLoader
+        训练集 DataLoader（shuffle=True）。
+    val_loader : DataLoader
+        验证集 DataLoader（shuffle=False）。
+    test_loader : DataLoader
+        测试集 DataLoader（shuffle=False）。
+    scalers : dict
+        包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
     # 1. 直接使用 dataset 中已划分好的三组数组
     train_snp, train_phenotype = dataset.snp_train, dataset.pheno_train

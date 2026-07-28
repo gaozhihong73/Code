@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 
 
 class ConvAEConfig(BaseModel):
-    """实验配置类"""
+    """ConvAE 卷积自编码器的训练配置。"""
 
     use_pheno_help: bool = True  # 是否使用表型辅助压缩
 
@@ -70,4 +70,5 @@ class ConvAEConfig(BaseModel):
 
     @property
     def log_file(self) -> str:
+        """日志文件路径"""
         return f"{self.output_dir}/convae.log"

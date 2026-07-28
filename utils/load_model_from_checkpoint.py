@@ -13,9 +13,20 @@ from model.TFPP import TFPP
 def load_model_from_checkpoint(model_dir: str | Path, device: str = "cpu"):
     """从 checkpoint 反推所有超参并重建 TFPP 模型。
 
-    Returns:
-        model: 已加载权重并设为 eval 模式的 TFPP 实例
-        info: dict 包含 snp_dim, time_points, degree, d_model...
+    Parameters
+    ----------
+    model_dir : str or Path
+        模型输出目录, 应包含 ``models/best_model.pt``。
+    device : str, optional
+        加载模型的设备, 默认 ``"cpu"``。
+
+    Returns
+    -------
+    model : TFPP
+        已加载权重并设为 eval 模式的 TFPP 实例。
+    info : dict
+        包含 ``snp_dim``, ``time_points``, ``degree``, ``d_model``,
+        ``num_layers``, ``d_ff``, ``phenotype_names`` 等信息。
     """
     model_dir = Path(model_dir)
     ckpt_path = model_dir / "models" / "best_model.pt"
@@ -84,12 +95,21 @@ def load_scaler_and_mean_curve(model_dir: str | Path):
 def denormalize_predictions(
     pred_norm: np.ndarray, scaler, mean_curve: np.ndarray
 ) -> np.ndarray:
-    """residual_global 逆归一化: zscored → raw = scaler⁻¹(flat) + mean_curve。
+    """residual_global 逆归一化: zscored -> raw = scaler_inv(flat) + mean_curve。
 
-    Args:
-        pred_norm: 模型原始输出, shape [B, P, T]
-        scaler: sklearn StandardScaler (仅 mean ≈ 0, std ≈ σ)
-        mean_curve: 训练集时间均值曲线, shape (1, P, T)
+    Parameters
+    ----------
+    pred_norm : np.ndarray
+        模型原始输出, shape ``(batch_size, n_pheno, n_time)``。
+    scaler : sklearn.preprocessing.StandardScaler
+        仅含 ``mean ~= 0, std ~= sigma`` 的 StandardScaler。
+    mean_curve : np.ndarray
+        训练集时间均值曲线, shape ``(1, n_pheno, n_time)``。
+
+    Returns
+    -------
+    np.ndarray
+        反归一化后的预测值, shape ``(batch_size, n_pheno, n_time)``。
     """
     B, P, T = pred_norm.shape
     flat = pred_norm.reshape(-1, 1)
@@ -100,16 +120,25 @@ def denormalize_predictions(
 def load_test_csvs(scenario: str, p: int, n: int, h: float, rep: int):
     """加载指定实验的测试集 genotype / phenotype csv。
 
-    Args:
-        scenario: "S0" | "S1"
-        p: SNP 数
-        n: 样本数
-        h: 遗传力
-        rep: 重复编号
+    Parameters
+    ----------
+    scenario : str
+        场景标识, ``"S0"`` 或 ``"S1"``。
+    p : int
+        SNP 数。
+    n : int
+        样本数。
+    h : float
+        遗传力。
+    rep : int
+        重复编号。
 
-    Returns:
-        X: [n_test, snp_dim] int64
-        y: [n_test, T] float32
+    Returns
+    -------
+    X : np.ndarray
+        基因型矩阵, shape ``(n_test, snp_dim)``, dtype ``int64``。
+    y : np.ndarray
+        表型矩阵, shape ``(n_test, n_time)``, dtype ``float32``。
     """
     dirname = f"P{p}_N{n}_H{h}"
     prefix = f"DynaGS_{scenario}_P{p}_H{h}_N{n}_Rep{rep:02d}"
@@ -122,11 +151,21 @@ def load_test_csvs(scenario: str, p: int, n: int, h: float, rep: int):
 
 
 def run_inference(model, X: np.ndarray, device: str):
-    """运行模型推理并返回反归一化后的预测值。
+    """运行模型推理并返回预测值。
 
-    Returns:
-        pred_raw: shape [N, 1, T] denormalized
-        pred_norm: shape [N, 1, T] 原始模型输出
+    Parameters
+    ----------
+    model : TFPP
+        已加载权重的模型实例 (eval 模式)。
+    X : np.ndarray
+        基因型矩阵, shape ``(n_samples, snp_dim)``。
+    device : str
+        推理设备 (``"cuda"`` 或 ``"cpu"``)。
+
+    Returns
+    -------
+    pred_norm : np.ndarray
+        模型原始输出, shape ``(n_samples, n_pheno, n_time)``。
     """
     with torch.no_grad():
         X_t = torch.tensor(X, dtype=torch.float32, device=device)
@@ -145,11 +184,33 @@ def prepare_plot_data(
 ):
     """一站式: 加载模型 + scaler + 测试数据 + 运行推理 + 反归一化。
 
-    Returns:
-        pred: [N, 1, T] denormalized predictions
-        y:    [N, 1, T] raw targets
-        time_coords: np.arange(1, T+1)
-        avg_metrics: dict with mse, rmse, mae, pcc, r2
+    Parameters
+    ----------
+    model_dir : str or Path
+        模型输出目录。
+    scenario : str
+        场景标识, ``"S0"`` 或 ``"S1"``。
+    p : int
+        SNP 数。
+    n : int
+        样本数。
+    h : float
+        遗传力。
+    rep : int
+        重复编号。
+    device : str, optional
+        推理设备, 默认 ``"cpu"``。
+
+    Returns
+    -------
+    pred : np.ndarray
+        反归一化后的预测值, shape ``(n_samples, 1, n_time)``。
+    y : np.ndarray
+        真实标签, shape ``(n_samples, 1, n_time)``。
+    time_coords : np.ndarray
+        时间坐标数组, ``np.arange(1, n_time + 1)``。
+    avg_metrics : dict
+        包含 ``mse``, ``rmse``, ``mae``, ``pcc``, ``r2`` 的平均指标。
     """
     print("=" * 60)
     print("加载模型...")

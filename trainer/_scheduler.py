@@ -29,6 +29,7 @@ class WarmupSequentialLR(_LRScheduler):
     """
 
     def __init__(self, optimizer, schedulers, milestones, last_epoch=-1):
+        """初始化调度器并预设初始学习率。"""
         if len(schedulers) != 2 or len(milestones) != 1:
             raise ValueError(
                 "WarmupSequentialLR 当前仅支持 [LinearLR -> CosineAnnealingLR] 两段 + "
@@ -54,9 +55,11 @@ class WarmupSequentialLR(_LRScheduler):
     # === 与 _LRScheduler 接口保持一致 ===
     @property
     def base_lrs(self):
+        """返回各参数组的基础学习率列表。"""
         return self._warmup.base_lrs
 
     def get_last_lr(self):
+        """返回上一次 step 后的学习率列表。"""
         return self._last_lr
 
     def get_lr(self):

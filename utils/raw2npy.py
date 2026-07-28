@@ -3,6 +3,15 @@ import pandas as pd
 
 
 def raw_to_npy(raw_file, npy_file):
+    """将 PLINK ``.raw`` 文件转换为压缩的 NumPy ``.npy`` 格式。
+
+    Parameters
+    ----------
+    raw_file : str
+        PLINK 生成的 ``.raw`` 文件路径。
+    npy_file : str
+        输出 ``.npy`` 文件路径。
+    """
     print(f"正在读取 PLINK .raw 文件: {raw_file}")
 
     # 读取 PLINK 生成的矩阵文本

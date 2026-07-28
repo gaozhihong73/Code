@@ -27,22 +27,27 @@ from utils import (
 
 
 class TFPPTrainer:
-    """
-    表型预测Transformer训练器
-    主要功能：
-    1. 训练基于Transformer的SNP表型预测模型
-    2. 使用多种评估指标（PCC、R²、MSE、RMSE）全面评估模型性能
-    3. 自动保存最佳模型和训练统计信息
-    4. 支持早停和学习率调度
+    """表型预测 Transformer 训练器。
+
+    基于 Transformer 架构的 SNP 表型预测模型训练器，支持常规训练与 K 折交叉验证两种模式。
+
+    Parameters
+    ----------
+    config : TFPPConfig
+        训练配置对象，包含模型结构、训练超参数、数据路径等全部设置。
+
+    Notes
+    -----
+    主要功能:
+
+    - 训练基于 Transformer 的 SNP 表型预测模型
+    - 使用多种评估指标 (PCC, R², MSE, RMSE) 全面评估模型性能
+    - 自动保存最佳模型和训练统计信息
+    - 支持早停和学习率调度
     """
 
     def __init__(self, config: TFPPConfig):
-        """
-        初始化训练器
-
-        Args:
-            config: 训练器的配置类
-        """
+        """初始化训练器并构建数据集与模型。"""
         # 保存配置
         self.config = config
 
@@ -187,7 +192,7 @@ class TFPPTrainer:
                 total_iters=self.warmup_epochs,
             )
             main_scheduler = CosineAnnealingLR(
-                optimizer, T_max=self.epochs - self.warmup_epochs, eta_min=0.0
+                optimizer, T_max=self.epochs - self.warmup_epochs, eta_min=safe_eta_min
             )
             # 使用 WarmupSequentialLR 将 warmup 和 main_scheduler 无缝拼接
             # (本仓库自带的轻量 wrapper, 与 SequentialLR 行为等价, 但避免上游 EPOCH_DEPRECATION_WARNING)
@@ -207,13 +212,21 @@ class TFPPTrainer:
     def _train_epoch(
         self, train_loader: DataLoader, optimizer: optim.Optimizer, criterion: nn.Module
     ) -> tuple[float, dict[str, float]]:
-        """
-        Args:
-            train_loader: 训练数据加载器
-            optimizer: 优化器
-            criterion: 损失函数
-        Returns:
-            平均训练损失和评估指标
+        """训练一个 epoch 并返回损失与指标。
+
+        Parameters
+        ----------
+        train_loader : DataLoader
+            训练数据加载器。
+        optimizer : optim.Optimizer
+            优化器。
+        criterion : nn.Module
+            损失函数。
+
+        Returns
+        -------
+        tuple[float, dict[str, float]]
+            平均训练损失和评估指标字典。
         """
         self.model.train()
         train_loss = 0.0
@@ -262,11 +275,20 @@ class TFPPTrainer:
 
     def _validate_epoch(
         self, val_loader: DataLoader, criterion: nn.Module
-    ) -> tuple[
-        float, dict[str, dict[str, float]], dict[str, float]
-    ]:  # <--- 修改了返回类型提示，增加了 float
-        """
-        验证一个epoch (已修改：支持记录 Gate 值)
+    ) -> tuple[float, dict[str, dict[str, float]], dict[str, float]]:
+        """验证一个 epoch 并返回损失与各表型指标。
+
+        Parameters
+        ----------
+        val_loader : DataLoader
+            验证数据加载器。
+        criterion : nn.Module
+            损失函数。
+
+        Returns
+        -------
+        tuple[float, dict[str, dict[str, float]], dict[str, float]]
+            平均验证损失、各表型指标字典和综合平均指标字典。
         """
         self.model.eval()
         num_batches = len(val_loader)
@@ -306,15 +328,19 @@ class TFPPTrainer:
     def _evaluate_test_set(
         self, test_loader: DataLoader, scalers: dict
     ) -> dict[str, Any]:
-        """
-        在测试集上进行最终评估（使用反归一化后的数据）
+        """在测试集上进行最终评估（使用反归一化后的数据）。
 
-        Args:
-            test_loader: 测试数据加载器
-            scalers: 归一化器字典
+        Parameters
+        ----------
+        test_loader : DataLoader
+            测试数据加载器。
+        scalers : dict
+            归一化器字典。
 
-        Returns:
-            测试集评估结果
+        Returns
+        -------
+        dict[str, Any]
+            包含归一化和反归一化两组评估结果的字典。
         """
         self.model.eval()
         all_preds = []
@@ -400,11 +426,12 @@ class TFPPTrainer:
                     )
 
     def _train_regular(self) -> dict[str, Any]:
-        """
-        常规训练模式（单次训练验证测试划分）
+        """常规训练模式（单次训练验证测试划分）。
 
-        Returns:
-            训练统计信息字典
+        Returns
+        -------
+        dict[str, Any]
+            训练统计信息字典。
         """
         self.logger.info("=" * 80)
         self.logger.info("常规训练")
@@ -632,11 +659,36 @@ class TFPPTrainer:
         final_lr: float,
         test_results: dict,
     ) -> None:
-        """
-        保存模型权重及完整的训练元数据（采用 PT + JSON + CSV 分离存储）
+        """保存模型权重及完整的训练元数据（采用 PT + JSON + CSV 分离存储）。
 
-        Args:
-            [参数说明保持不变]
+        Parameters
+        ----------
+        best_model_state : dict[str, Any] | None
+            最优模型状态字典，为 None 时保存空状态。
+        best_val_loss : float
+            最优验证损失。
+        best_epoch : int
+            最优 epoch 编号。
+        best_val_metrics : dict
+            所有表型的综合最优验证指标。
+        best_val_pheno_metrics : dict[str, dict[str, float]] | None
+            各表型的最优验证指标。
+        training_time : float
+            训练总耗时（秒）。
+        train_loss_history : list
+            每轮训练损失列表。
+        val_loss_history : list
+            每轮验证损失列表。
+        train_metrics_history : list
+            每轮训练综合指标列表。
+        val_metrics_history : list
+            每轮验证综合指标列表。
+        val_pheno_metrics_history : list
+            每轮验证各表型详细指标列表。
+        final_lr : float
+            训练结束时的最终学习率。
+        test_results : dict
+            测试集评估结果。
         """
         # ==========================================
         # 1. 保存纯模型权重 (.pt)
@@ -741,17 +793,25 @@ class TFPPTrainer:
         test_loader: DataLoader,
         scalers: dict,
     ) -> dict[str, Any]:
-        """
-        训练单个折
+        """训练单个折。
 
-        Args:
-            fold_idx: 当前折的索引
-            train_loader: 训练数据加载器
-            val_loader: 验证数据加载器
-            scalers: 归一化器字典
+        Parameters
+        ----------
+        fold_idx : int
+            当前折的索引。
+        train_loader : DataLoader
+            训练数据加载器。
+        val_loader : DataLoader
+            验证数据加载器。
+        test_loader : DataLoader
+            测试数据加载器。
+        scalers : dict
+            归一化器字典。
 
-        Returns:
-            该折的训练结果
+        Returns
+        -------
+        dict[str, Any]
+            该折的训练结果字典。
         """
         self.logger.info(f"{'=' * 80}")
         self.logger.info(f"开始训练第 {fold_idx + 1}/{self.n_folds} 折")
@@ -911,8 +971,10 @@ class TFPPTrainer:
         - 由于每折训练独立模型，不存在信息泄露问题
         - 最终指标全部基于反归一化后的数据
 
-        Returns:
-            K折交叉验证的统计结果
+        Returns
+        -------
+        dict[str, Any]
+            K折交叉验证的统计结果字典。
         """
         self._log_configuration()
 
@@ -1068,14 +1130,18 @@ class TFPPTrainer:
         phenotype_metrics: dict,
         total_time: float,
     ):
-        """
-        保存K折交叉验证结果
+        """保存 K 折交叉验证结果。
 
-        Args:
-            fold_results: 每折的详细结果
-            overall_metrics: 整体反归一化指标
-            phenotype_metrics: 各表型反归一化指标
-            total_time: 总训练时间
+        Parameters
+        ----------
+        fold_results : list
+            每折的详细结果列表。
+        overall_metrics : dict
+            整体反归一化指标。
+        phenotype_metrics : dict
+            各表型反归一化指标。
+        total_time : float
+            总训练时间（秒）。
         """
         # 保存整体指标统计
         overall_stats = pd.DataFrame(
@@ -1165,11 +1231,12 @@ class TFPPTrainer:
         self.logger.info(f"K折摘要已保存: {summary_path}\n")
 
     def train(self) -> dict[str, Any]:
-        """
-        根据配置选择训练模式（K折交叉验证 或 常规训练）
+        """根据配置选择训练模式（K折交叉验证或常规训练）。
 
-        Returns:
-            训练统计信息字典
+        Returns
+        -------
+        dict[str, Any]
+            训练统计信息字典。
         """
         if self.use_kfold:
             # 使用K折交叉验证

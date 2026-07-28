@@ -1,3 +1,9 @@
+"""将 SNP CSV 文件批量转换为 PLINK2 所需的制表符分隔文本格式。
+
+读取 ``../temp/csv/`` 下的所有 ``.csv`` 文件，从 SNP ID 中解析染色体和位置信息，
+生成包含 CHR、START、END、LABEL 四列的无表头 ``.txt`` 文件。
+"""
+
 import glob
 import os
 
@@ -18,7 +24,7 @@ for file_path in csv_files:
     print(f"正在生成 PLINK2 格式文件: {file_path}")
     df = pd.read_csv(file_path)
 
-    snp_ids = df.iloc[:, 0].astype(str)
+    snp_ids = df.iloc[:, 0].astype("string")
     regions_df = snp_ids.str.split("_", expand=True)[[0, 1]]
 
     plink2_df = pd.DataFrame()

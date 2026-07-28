@@ -5,10 +5,23 @@ import torch
 def compute_metrics_vectorized(
     pred: np.ndarray, target: np.ndarray
 ) -> dict[str, float]:
-    """
-    修正版 V3：计算指标。
-    R2 采用 "Time-Adjusted Global R2" (时间校正全局R2)。
+    """计算预测与真值之间的多维指标 (向量化版本)。
+
+    R2 采用 "Time-Adjusted Global R2" (时间校正全局R2):
     既避免了单点计算的数值爆炸，又避免了全局计算的虚高问题。
+
+    Parameters
+    ----------
+    pred : np.ndarray
+        预测值, shape ``(n_samples, n_time)``。
+    target : np.ndarray
+        真实标签, shape ``(n_samples, n_time)``。
+
+    Returns
+    -------
+    dict[str, float]
+        包含 ``mse``, ``rmse``, ``mae``, ``pcc``, ``r2`` 的指标字典,
+        各指标为沿时间维度取均值后的标量。
     """
     # 1. 基础误差指标 (MSE/MAE/RMSE 保持原样，按列平均)
     residuals = target - pred
@@ -66,9 +79,23 @@ def compute_metrics_vectorized(
 def calculate_phenotype_metrics_by_time(
     pred: torch.Tensor, target: torch.Tensor, selected_phenotypes: list[str]
 ) -> dict[str, dict[str, float]]:
-    """
-    计算每个表型按时间点计算后的平均指标。
-    【优化后】：利用 compute_metrics_vectorized 直接处理矩阵，移除内层循环。
+    """计算每个表型按时间点计算后的平均指标。
+
+    利用 ``compute_metrics_vectorized`` 直接处理矩阵，移除内层循环。
+
+    Parameters
+    ----------
+    pred : torch.Tensor
+        预测值, shape ``(batch_size, n_pheno, n_time)``。
+    target : torch.Tensor
+        真实标签, shape ``(batch_size, n_pheno, n_time)``。
+    selected_phenotypes : list[str]
+        表型名称列表。
+
+    Returns
+    -------
+    dict[str, dict[str, float]]
+        ``{pheno_name: {mse, rmse, mae, pcc, r2}}`` 的嵌套字典。
     """
     assert pred.shape == target.shape
 
