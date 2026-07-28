@@ -73,12 +73,38 @@ class TFPPTrainer:
         self.phenotype_names = config.phenotype_names
         self.dataset = self._create_dataset()
         self.num_sample = len(self.dataset)
-        self.snp_dim: int = self.dataset.snp.shape[1]
         self.train_ratio = config.train_ratio
         self.val_ratio = config.val_ratio
         self.test_ratio = config.test_ratio
         self.norm_method = config.norm_method
         self.scaler_type = config.scaler_type
+        self.seed = config.seed
+
+        # SNP 特征筛选（在划分前对全量数据执行，筛选后再创建模型）
+        self.screen_k = config.screen_k
+        self.gwas_k = config.gwas_k
+        if self.screen_k > 0 or self.gwas_k > 0:
+            from utils import compute_cache_key, screen_snps
+
+            cache_key = compute_cache_key(
+                snp_file=self.snp_file,
+                pheno_source=self.pheno_dir,
+                phenotype_names=self.phenotype_names,
+                screen_k=self.screen_k,
+                gwas_k=self.gwas_k,
+                seed=self.seed,
+            )
+            screened_idx = screen_snps(
+                self.dataset.snp,
+                self.dataset.phenotype,
+                screen_k=self.screen_k,
+                gwas_k=self.gwas_k,
+                cache_key=cache_key,
+            )
+            if screened_idx is not None:
+                self.dataset.snp = self.dataset.snp[:, screened_idx]
+
+        self.snp_dim: int = self.dataset.snp.shape[1]
 
         # 日志记录器
         self.log_file = self.config.log_file
@@ -95,7 +121,6 @@ class TFPPTrainer:
         self.patience = config.patience
         self.grad_clip_norm = config.grad_clip_norm
         self.device = config.device
-        self.seed = config.seed
         self.num_workers = config.num_workers
         self.dropout = config.dropout
 

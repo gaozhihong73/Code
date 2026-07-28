@@ -1,3 +1,10 @@
+"""ConvAE 卷积自编码器的数据加载与预处理模块。
+
+本模块负责 ConvAE 训练所需的数据管线：从 .npy 加载 SNP 基因型（+1 偏移处理缺失值）、
+滑动窗口分块（chunk_size + overlap）、动态零填充对齐、表型全局 Z-score 归一化，
+最终构建 PyTorch DataLoader。
+"""
+
 from pathlib import Path
 
 import numpy as np

@@ -1,3 +1,13 @@
+"""TFPP 主模型定义：Wide & Deep 架构的时序基因组表型预测模型。
+
+本模块实现 TFPP (Time-aware Feature Projection & Prediction) 的完整网络结构，包含：
+- LinearSelfAttention: 基于核函数的线性自注意力 (O(D²) 复杂度，避免 O(N²) 显存瓶颈)
+- LinearTransformerEncoder: 多层 Pre-Norm 线性 Transformer 编码器 (Deep 通路)
+- LegendreWideLayer: 勒让德多项式宽通路，将 SNP 直接映射为时间曲线 (Wide 通路)
+- TimeAwarePredictor: 交叉注意力预测头，聚合编码特征后预测各时间点表型
+- TFPP: 主模型，通过动态门控网络融合 Wide & Deep 输出
+"""
+
 import math
 
 import torch

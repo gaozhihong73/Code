@@ -1,4 +1,6 @@
-"""模拟数据实验配置 (SimTFPPConfig)
+"""模拟数据实验配置 (SimTFPPConfig)。
+
+本模块定义 SimTFPPConfig (Pydantic BaseModel)，管理模拟数据 TFPP 训练的全部超参数。
 
 与 TFPPConfig 的关键差异:
 - 数据由 6 个 csv 路径指定 (Train/Val/Test × Genotype/Phenotype),而非 snp_file + pheno_dir
@@ -15,7 +17,12 @@ from pydantic import BaseModel, Field
 
 
 class SimTFPPConfig(BaseModel):
-    """模拟数据 TFPP 表型预测模型的训练配置，支持预划分的基因型/表型 CSV 输入。"""
+    """模拟数据 TFPP 表型预测模型的训练配置，支持预划分的基因型/表型 CSV 输入。
+
+    与 TFPPConfig 相比新增损失函数类型选择 (loss_type)、L1 稀疏正则 (l1_wide_weight)、
+    特征筛选 (screen_k / gwas_k) 等字段。degree 默认为 0 (纯加性遗传架构,
+    仅保留勒让德多项式常数项)。seed 默认 73, 训练与推理必须保持一致。
+    """
 
     # ============ 实验标识 ============
     exp_name: str = Field(
@@ -40,14 +47,14 @@ class SimTFPPConfig(BaseModel):
     test_pheno_csv: str = ""
 
     # ============ 训练超参数 ============
-    epochs: int = Field(default=100, ge=1, le=500)
+    epochs: int = Field(default=200, ge=1, le=500)
     lr: float = Field(default=0.0001, gt=0)
     weight_decay: float = 0.0001
     min_lr: float = 1e-6
     batch_size: int = Field(default=32, ge=1, multiple_of=2)
-    patience: int = 10
+    patience: int = 20
     seed: int = 73
-    dropout: float = 0.3
+    dropout: float = 0.0
     grad_clip_norm: float = 1.0
     is_save_training_info: bool = True
     device: str = Field(
@@ -61,12 +68,12 @@ class SimTFPPConfig(BaseModel):
     warmup_end_factor: float = 1.0
 
     # ============ 模型参数 ============
-    d_model: int = 64
+    d_model: int = 32
     num_heads: int = 4
-    num_layers: int = 2
-    d_ff: int = 256
-    degree: int = 0  # Legendre 多项式阶数, 0=只保留常数项(适用于纯加性遗传架构)
-    ablation_mode: str = Field(default="none", pattern="^(none|wide|deep|add)$")
+    num_layers: int = 1
+    d_ff: int = 128
+    degree: int = 5  # Legendre 多项式阶数
+    ablation_mode: str = Field(default="all", pattern="^(all|wide|deep|add)$")
     time_coordinates: list[float] = Field(
         default_factory=lambda: list(range(1, 21)),  # [1..20]
         min_length=1,
@@ -79,7 +86,7 @@ class SimTFPPConfig(BaseModel):
 
     # ============ 损失函数 ============
     loss_type: str = Field(
-        default="mse_offset",
+        default="mse",
         pattern="^(mse|mse_pcc|mse_offset)$",
         description="mse=纯MSE, mse_pcc=MSE+PCC, mse_offset=MSE+个体偏移MSE",
     )

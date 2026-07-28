@@ -99,6 +99,20 @@ def parse_args():
         "--num_workers", type=int, default=4, help="DataLoader 工作线程数"
     )
 
+    # ================= SNP 特征筛选 =================
+    parser.add_argument(
+        "--screen_k",
+        type=int,
+        default=0,
+        help="DC-SIS 筛选保留的 SNP 数目, 0=跳过 (两阶段: GWAS 粗筛后在子集上精筛)",
+    )
+    parser.add_argument(
+        "--gwas_k",
+        type=int,
+        default=0,
+        help="GWAS 筛选保留的 SNP 数目, 0=跳过 (向量化, 适合高维 SNP 粗筛)",
+    )
+
     # ================= 学习率调度器 (Warmup) =================
     parser.add_argument(
         "--use_warmup",
@@ -184,6 +198,8 @@ def main():
         seed=args.seed,
         is_save_training_info=args.is_save,
         num_workers=args.num_workers,
+        screen_k=args.screen_k,
+        gwas_k=args.gwas_k,
         use_warmup=args.use_warmup,
         warmup_epochs=args.warmup_epochs,
         warmup_start_factor=args.warmup_start_factor,

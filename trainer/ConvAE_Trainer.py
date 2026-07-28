@@ -18,7 +18,7 @@ from utils import Logger
 
 
 class ConvAETrainer:
-    """ConvAE 训练器，集成 TFPP 风格的日志保存、Curriculum Learning (课程学习) 与指标追踪。"""
+    """ConvAE 训练器"""
 
     def __init__(self, config: ConvAEConfig):
         """初始化训练器并构建数据集与模型。"""
@@ -46,7 +46,7 @@ class ConvAETrainer:
 
         # 日志记录器
         self.log_file = config.log_file
-        self.logger = Logger(self.log_file, unique=False)
+        self.logger = Logger(log_filename=self.log_file, unique=False)
 
         # 训练超参数
         self.epochs = config.epochs
@@ -94,7 +94,7 @@ class ConvAETrainer:
         self.pheno_weight = config.pheno_weight
 
         self.is_cuda = "cuda" in str(self.device)
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.is_cuda)
+        self.scaler = torch.GradScaler(device="cuda", enabled=self.is_cuda)
 
     def _create_model(self) -> ConvAE:
         """获取模型。"""
@@ -173,7 +173,7 @@ class ConvAETrainer:
             X_chunks = X_chunks.to(self.device)
             pheno_target = pheno_target.to(self.device)
 
-            with torch.amp.autocast("cuda", enabled=self.is_cuda):
+            with torch.autocast(device_type="cuda", enabled=self.is_cuda):
                 _, pred_phenotype, pred_snps, _ = self.model(X_chunks, mask_ratio=0.5)
 
                 # 1. 计算重建损失
@@ -252,7 +252,7 @@ class ConvAETrainer:
                 X_chunks = X_chunks.to(self.device)
                 pheno_target = pheno_target.to(self.device)
 
-                with torch.amp.autocast("cuda", enabled=self.is_cuda):
+                with torch.autocast("cuda", enabled=self.is_cuda):
                     # 注意：在 eval 模式下，ConvAE.py 中的 mask_ratio 将被忽略，pred_snps 返回 None
                     _, pred_phenotype, _, _ = self.model(X_chunks, mask_ratio=0.0)
 
@@ -422,7 +422,7 @@ class ConvAETrainer:
         with torch.no_grad():
             for X_chunks, _ in compress_loader:
                 X_chunks = X_chunks.to(self.device)
-                with torch.amp.autocast("cuda", enabled=self.is_cuda):
+                with torch.autocast("cuda", enabled=self.is_cuda):
                     # 调用模型本身前向获得压缩特征，此时掩码比率一定为 0
                     compressed_final_X, _, _, _ = self.model(X_chunks, mask_ratio=0.0)
 

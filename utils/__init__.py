@@ -14,6 +14,7 @@ from .Normalization import (
     load_scalers,
     save_scalers,
 )
+from .Screening import compute_cache_key, screen_snps
 
 __all__ = [
     "NORM_FUNC_REGISTRY",
@@ -26,7 +27,9 @@ __all__ = [
     "apply_timepoint_norm",
     "calculate_metrics_by_average",
     "calculate_phenotype_metrics_by_time",
+    "compute_cache_key",
     "denormalize_phenotype",
     "load_scalers",
     "save_scalers",
+    "screen_snps",
 ]

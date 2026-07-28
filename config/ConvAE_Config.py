@@ -1,9 +1,21 @@
+"""ConvAE 卷积自编码器的训练配置定义。
+
+本模块定义 ConvAEConfig (Pydantic BaseModel)，管理卷积自编码器 (ConvAE) 训练所需的
+超参数、数据路径和输出目录。ConvAE 用于将高维 SNP 数据压缩为低维潜在表示，
+压缩结果可供下游 TFPP 模型使用。
+"""
+
 import torch
 from pydantic import BaseModel, Field
 
 
 class ConvAEConfig(BaseModel):
-    """ConvAE 卷积自编码器的训练配置。"""
+    """ConvAE 卷积自编码器的训练配置。
+
+    损失函数由 recon_weight (重构损失) 和 pheno_weight (表型辅助损失) 加权组合，
+    两者之和应为 1.0。use_pheno_help 控制是否启用表型辅助压缩分支。
+    注意: batch_size 必须为 2 的倍数; seed 默认 73。
+    """
 
     use_pheno_help: bool = True  # 是否使用表型辅助压缩
 

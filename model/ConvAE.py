@@ -1,3 +1,11 @@
+"""ConvAE 卷积自编码器模型定义：Masked Autoencoder + 表型预测联合训练。
+
+本模块实现 ConvAE 的完整网络结构，包含：
+- SNPFeatureExtractor: 将离散 SNP 序列转换为 Patch 向量并添加位置编码
+- ConvAE: 主模型，通过 MAE 风格掩码重建学习 SNP 压缩表征，
+  同时使用表型预测头进行监督学习，压缩结果可供下游 TFPP 模型使用
+"""
+
 import torch
 from torch import nn
 

@@ -1,3 +1,9 @@
+"""TFPP 主模型的训练与推理配置定义。
+
+本模块定义 TFPPConfig (Pydantic BaseModel)，集中管理 TFPP 模型训练/推理所需的
+全部超参数、数据路径、模型结构参数和输出目录。
+"""
+
 from datetime import datetime
 
 import torch
@@ -5,7 +11,13 @@ from pydantic import BaseModel, Field
 
 
 class TFPPConfig(BaseModel):
-    """TFPP 表型预测模型的训练与推理配置。"""
+    """TFPP 表型预测模型的训练与推理配置。
+
+    所有字段均通过 Pydantic Field 进行类型校验与约束检查。
+    注意: batch_size 必须为 2 的倍数 (K-fold 分组需要);
+    ablation_mode 决定模型是否实例化 Wide/Deep 分支 (联动 model/TFPP.py);
+    seed 默认 73, 训练与推理必须保持一致以复现数据划分。
+    """
 
     exp_name: str = Field(
         default_factory=lambda: (
@@ -51,9 +63,9 @@ class TFPPConfig(BaseModel):
         description="Legendre 多项式阶数, 0=退化为纯加性(仅常数项)",
     )
     ablation_mode: str = Field(
-        default="none",
-        pattern="^(none|wide|deep|add)$",
-        description="模型消融模式: none=完整模型, wide=仅宽通路, deep=仅深通路, add=去掉门控直接相加",
+        default="all",
+        pattern="^(all|wide|deep|add)$",
+        description="模型消融模式: all=完整模型, wide=仅宽通路, deep=仅深通路, add=去掉门控直接相加",
     )
     time_coordinates: list[float] = Field(
         default_factory=lambda: [
@@ -90,6 +102,19 @@ class TFPPConfig(BaseModel):
     test_ratio: float = 0.1
     val_ratio: float = 0.1
     num_workers: int = 4
+
+    # SNP 特征筛选参数 (0=不筛选)
+    screen_k: int = Field(
+        default=0,
+        ge=0,
+        description="DC-SIS 筛选保留的 SNP 数目, 0=跳过",
+    )
+    gwas_k: int = Field(
+        default=0,
+        ge=0,
+        description="GWAS 筛选保留的 SNP 数目, 0=跳过",
+    )
+
     # 规范字符串输入
     norm_method: str = Field(
         default="global",
@@ -114,7 +139,7 @@ class TFPPConfig(BaseModel):
 
     @property
     def training_history_save_dir(self) -> str:
-        """训练好模型的保存目录"""
+        """训练历史文件的保存目录"""
         return f"{self.output_dir}/training_history"
 
     @property
