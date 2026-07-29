@@ -113,6 +113,30 @@ def parse_args():
         help="GWAS 筛选保留的 SNP 数目, 0=跳过 (向量化, 适合高维 SNP 粗筛)",
     )
 
+    # ================= 损失函数与正则化 =================
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        default="mse_pcc",
+        choices=["mse", "mse_pcc", "mse_offset"],
+        help="损失函数类型: mse=纯MSE, mse_pcc=MSE+PCC, mse_offset=MSE+个体偏移MSE",
+    )
+    parser.add_argument(
+        "--pcc_weight", type=float, default=1.0, help="PCC 损失权重 (mse_pcc/mse_offset)"
+    )
+    parser.add_argument(
+        "--offset_weight",
+        type=float,
+        default=0.5,
+        help="个体偏移损失权重 (mse_offset)",
+    )
+    parser.add_argument(
+        "--l1_wide_weight",
+        type=float,
+        default=0.0,
+        help="宽通路 L1 稀疏正则系数, 0=关闭",
+    )
+
     # ================= 学习率调度器 (Warmup) =================
     parser.add_argument(
         "--use_warmup",
@@ -200,6 +224,10 @@ def main():
         num_workers=args.num_workers,
         screen_k=args.screen_k,
         gwas_k=args.gwas_k,
+        loss_type=args.loss_type,
+        pcc_weight=args.pcc_weight,
+        offset_weight=args.offset_weight,
+        l1_wide_weight=args.l1_wide_weight,
         use_warmup=args.use_warmup,
         warmup_epochs=args.warmup_epochs,
         warmup_start_factor=args.warmup_start_factor,

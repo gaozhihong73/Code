@@ -12,6 +12,15 @@ import numpy as np
 from scipy import stats
 from sklearn.decomposition import PCA
 
+
+def _log(logger, msg: str) -> None:
+    """统一日志输出: 有 logger 时走 logger.info, 否则 print。"""
+    if logger is not None:
+        logger.info(msg)
+    else:
+        print(msg)
+
+
 # ---------------------------------------------------------------------------
 # 缓存工具
 # ---------------------------------------------------------------------------
@@ -70,22 +79,24 @@ def compute_cache_key(
     return hasher.hexdigest()
 
 
-def _load_cache(cache_key: str, cache_dir: str) -> np.ndarray | None:
+def _load_cache(cache_key: str, cache_dir: str, logger=None) -> np.ndarray | None:
     """尝试从磁盘加载缓存的筛选索引。"""
     cache_path = Path(cache_dir) / f"{cache_key}.npy"
     if cache_path.exists():
         indices = np.load(cache_path)
-        print(f"[缓存命中] 从 {cache_path} 加载 {len(indices)} 个 SNP 索引")
+        _log(logger, f"  [缓存命中] 从 {cache_path} 加载 {len(indices)} 个 SNP 索引")
         return indices
     return None
 
 
-def _save_cache(cache_key: str, cache_dir: str, indices: np.ndarray) -> None:
+def _save_cache(
+    cache_key: str, cache_dir: str, indices: np.ndarray, logger=None
+) -> None:
     """将筛选索引保存到磁盘。"""
     cache_path = Path(cache_dir) / f"{cache_key}.npy"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(cache_path, indices)
-    print(f"[缓存写入] 已保存 {len(indices)} 个 SNP 索引到 {cache_path}")
+    _log(logger, f"  [缓存写入] 已保存 {len(indices)} 个 SNP 索引到 {cache_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +119,7 @@ def dc_sis_screen(
     pheno_train: np.ndarray,
     k: int,
     verbose: bool = True,
+    logger=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """DC-SIS 特征筛选（距离相关系数）。
 
@@ -205,10 +217,11 @@ def dc_sis_screen(
     k = min(k, P)
     idx = np.argsort(dcor)[::-1][:k].astype(np.int64)
     if verbose:
-        print(f"DC-SIS 筛选完成: 按 dCor 保留 {k}/{P} SNPs")
-        print(
-            f"  dCor 分布: min={dcor[idx[-1]]:.4f}  max={dcor[idx[0]]:.4f}  "
-            f"mean={dcor.mean():.4f}  median={np.median(dcor):.4f}"
+        _log(logger, f"    DC-SIS 筛选完成: 按 dCor 保留 {k}/{P} SNPs")
+        _log(
+            logger,
+            f"    dCor 分布: min={dcor[idx[-1]]:.4f}  max={dcor[idx[0]]:.4f}  "
+            f"mean={dcor.mean():.4f}  median={np.median(dcor):.4f}",
         )
 
     return idx, dcor
@@ -221,6 +234,7 @@ def gwas_screen(
     n_pcs: int = 5,
     use_rint: bool = True,
     verbose: bool = True,
+    logger=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """向量化 GWAS 特征筛选（动态性状 + PCA 协变量 + min-P 策略）。
 
@@ -312,17 +326,20 @@ def gwas_screen(
 
         min_p = np.minimum(min_p, p_vals)
         if verbose:
-            print(
-                f"  GWAS 性状 {trait_name}: "
-                f"min p={p_vals.min():.2e}  median p={np.median(p_vals):.2e}"
+            _log(
+                logger,
+                f"    GWAS 性状 {trait_name}: "
+                f"min p={p_vals.min():.2e}  median p={np.median(p_vals):.2e}",
             )
 
     # ---- 7. Top-k by 最小 min-P ----
     k = min(k, P)
     idx = np.argsort(min_p)[:k].astype(np.int64)
     if verbose:
-        print(f"GWAS 筛选完成: 按 min-P 保留 {k}/{P} SNPs")
-        print(f"  min-P 分布: min={min_p[idx[0]]:.2e}  max={min_p[idx[-1]]:.2e}")
+        _log(logger, f"    GWAS 筛选完成: 按 min-P 保留 {k}/{P} SNPs")
+        _log(
+            logger, f"    min-P 分布: min={min_p[idx[0]]:.2e}  max={min_p[idx[-1]]:.2e}"
+        )
 
     return idx, min_p
 
@@ -340,6 +357,7 @@ def screen_snps(
     cache_key: str | None = None,
     cache_dir: str = "dataset/screen_cache",
     verbose: bool = True,
+    logger=None,
 ) -> np.ndarray | None:
     """统一 SNP 筛选入口：多表型 + 两阶段串联 + 磁盘缓存。
 
@@ -363,6 +381,8 @@ def screen_snps(
         缓存文件存放目录，默认 ``'outputs/screen_cache'``。
     verbose : bool, optional
         是否打印筛选信息，默认 ``True``。
+    logger : optional
+        Logger 实例，传入时日志写入训练日志文件；``None`` 时输出到 stdout。
 
     Returns
     -------
@@ -377,33 +397,37 @@ def screen_snps(
 
     # ---- 尝试加载缓存 ----
     if cache_key is not None:
-        cached = _load_cache(cache_key, cache_dir)
+        cached = _load_cache(cache_key, cache_dir, logger=logger)
         if cached is not None:
             return cached
 
     if verbose:
-        print(f"\n{'=' * 60}")
-        print(
-            f"SNP 筛选: P={P}, n_pheno={n_pheno}, screen_k={screen_k}, gwas_k={gwas_k}"
-        )
-        print(f"{'=' * 60}")
+        _log(logger, "=" * 60)
+        _log(logger, "SNP 特征筛选")
+        _log(logger, f"  原始特征数: {P}")
+        _log(logger, f"  表型数量:   {n_pheno}")
+        _log(logger, f"  screen_k:   {screen_k}")
+        _log(logger, f"  gwas_k:     {gwas_k}")
+        _log(logger, "=" * 60)
 
     # ---- 两阶段串联 ----
     # 阶段 1: GWAS 在全 P 维向量化粗筛（快，几分钟内完成 2M）
     gwas_union = None
     if gwas_k > 0 and gwas_k < P:
         if verbose:
-            print(f"\n[阶段1] GWAS 粗筛: {P} -> 每表型 top-{gwas_k}")
+            _log(logger, f"[阶段1] GWAS 粗筛: {P} -> 每表型 top-{gwas_k}")
         gwas_sets = []
         for i in range(n_pheno):
             pheno_i = pheno_train[:, i, :]  # (N, T)
             if verbose:
-                print(f"  表型 {i + 1}/{n_pheno}:")
-            idx_i, _ = gwas_screen(snp_train, pheno_i, k=gwas_k, verbose=verbose)
+                _log(logger, f"  表型 {i + 1}/{n_pheno}:")
+            idx_i, _ = gwas_screen(
+                snp_train, pheno_i, k=gwas_k, verbose=verbose, logger=logger
+            )
             gwas_sets.append(idx_i)
         gwas_union = np.unique(np.concatenate(gwas_sets))
         if verbose:
-            print(f"  GWAS 跨表型并集: {len(gwas_union)} SNPs")
+            _log(logger, f"  GWAS 跨表型并集: {len(gwas_union)} SNPs")
 
     # 阶段 2: DC-SIS 筛选
     # P 较小时直接在全维度独立跑（并行策略，能发现 GWAS 遗漏的位点）
@@ -416,29 +440,30 @@ def screen_snps(
             subset = np.sort(np.asarray(gwas_union))
             snp_subset = snp_train[:, subset]
             if verbose:
-                print(
-                    f"\n[阶段2] DC-SIS 精筛 (串联): 在 GWAS 候选 {len(subset)} SNPs 上, "
-                    f"每表型 top-{screen_k}"
+                _log(
+                    logger,
+                    f"[阶段2] DC-SIS 精筛 (串联): 在 GWAS 候选 {len(subset)} SNPs 上, "
+                    f"每表型 top-{screen_k}",
                 )
         else:
             subset = np.arange(P)
             snp_subset = snp_train
             if verbose:
-                print(f"\n[DC-SIS] 全维度独立筛选: P={P}, 每表型 top-{screen_k}")
+                _log(logger, f"[DC-SIS] 全维度独立筛选: P={P}, 每表型 top-{screen_k}")
 
         dc_sets = []
         for i in range(n_pheno):
             pheno_i = pheno_train[:, i, :]
             if verbose:
-                print(f"  表型 {i + 1}/{n_pheno}:")
+                _log(logger, f"  表型 {i + 1}/{n_pheno}:")
             idx_local, _ = dc_sis_screen(
-                snp_subset, pheno_i, k=screen_k, verbose=verbose
+                snp_subset, pheno_i, k=screen_k, verbose=verbose, logger=logger
             )
             # 将子集局部索引映射回原始列索引
             dc_sets.append(subset[idx_local])
         dc_union = np.unique(np.concatenate(dc_sets))
         if verbose:
-            print(f"  DC-SIS 跨表型并集: {len(dc_union)} SNPs")
+            _log(logger, f"  DC-SIS 跨表型并集: {len(dc_union)} SNPs")
 
     # ---- 合并最终结果 ----
     if dc_union is not None and gwas_union is not None:
@@ -446,18 +471,20 @@ def screen_snps(
             # 串联模式: GWAS 仅做预过滤, 最终结果取 DC-SIS 精选
             screened_idx = dc_union
             if verbose:
-                print(
-                    f"\n串联模式: GWAS 预筛 {len(gwas_union)} -> "
-                    f"DC-SIS 精选 {len(dc_union)} SNPs (最终结果)"
+                _log(
+                    logger,
+                    f"串联模式: GWAS 预筛 {len(gwas_union)} -> "
+                    f"DC-SIS 精选 {len(dc_union)} SNPs (最终结果)",
                 )
         else:
             # 并行模式: 两者独立筛选, 取并集
             screened_idx = np.union1d(dc_union, gwas_union)
             if verbose:
                 overlap = len(dc_union) + len(gwas_union) - len(screened_idx)
-                print(
-                    f"\n最终并集: DC-SIS {len(dc_union)} ∪ GWAS {len(gwas_union)} "
-                    f"= {len(screened_idx)} SNPs (交集 {overlap})"
+                _log(
+                    logger,
+                    f"最终并集: DC-SIS {len(dc_union)} ∪ GWAS {len(gwas_union)} "
+                    f"= {len(screened_idx)} SNPs (交集 {overlap})",
                 )
     elif dc_union is not None:
         screened_idx = dc_union
@@ -467,10 +494,11 @@ def screen_snps(
     screened_idx = np.sort(np.asarray(screened_idx)).astype(np.int64)
 
     if verbose:
-        print(f"筛选完成: {P} -> {len(screened_idx)} SNPs")
+        _log(logger, f"筛选完成: {P} -> {len(screened_idx)} SNPs")
+        _log(logger, "=" * 60)
 
     # ---- 写入缓存 ----
     if cache_key is not None:
-        _save_cache(cache_key, cache_dir, screened_idx)
+        _save_cache(cache_key, cache_dir, screened_idx, logger=logger)
 
     return screened_idx

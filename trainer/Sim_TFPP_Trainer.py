@@ -32,6 +32,7 @@ from utils import (
     calculate_phenotype_metrics_by_time,
     denormalize_phenotype,
     load_scalers,
+    save_model_config,
     save_scalers,
 )
 
@@ -148,13 +149,14 @@ class SimTFPPTrainer:
         )
 
     def _create_optimizer_and_scheduler(self):
-        """创建优化器与学习率调度器。"""
+        """创建优化器与学习率调度器"""
         base_lr = self.lr
         wide_lr_scale = 1.0
         wide_wd_scale = 1.0
 
         wide_params = []
         deep_params = []
+
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -399,9 +401,9 @@ class SimTFPPTrainer:
 
     def _train_regular(self) -> dict[str, Any]:
         """常规训练模式（单次训练验证测试划分）。"""
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
         self.logger.info("模拟数据常规训练")
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
 
         self._log_configuration()
 
@@ -496,9 +498,9 @@ class SimTFPPTrainer:
         self.logger.info(f"    training_time: {training_time / 60:.2f} 分钟\n")
 
         # 测试集评估
-        self.logger.info("=" * 80)
-        self.logger.info("测试集评估")
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
+        self.logger.info("模拟数据测试集评估")
+        self.logger.info("=" * 60)
 
         self.model.load_state_dict(best_model_state)
         scalers = load_scalers(self.scaler_file)
@@ -571,6 +573,16 @@ class SimTFPPTrainer:
         cpu_model_state = {k: v.cpu().clone() for k, v in best_model_state.items()}
         torch.save(cpu_model_state, model_path)
         self.logger.info(f"【模型权重】已保存至: {model_path}")
+
+        # 保存模型结构配置 (供 load_tfpp_model 直接读取)
+        save_model_config(self.config, self.config.output_dir)
+        _cfg_path = Path(self.config.output_dir) / "model_config.json"
+        if _cfg_path.exists():
+            with open(_cfg_path, mode="r", encoding="utf-8") as _f:
+                _mc = json.load(_f)
+            _mc["snp_dim"] = self.snp_dim
+            with open(_cfg_path, "w", encoding="utf-8") as _f:
+                json.dump(_mc, _f, ensure_ascii=False, indent=2)
 
         # 2. 训练摘要
         summary_info = {
@@ -657,40 +669,66 @@ class SimTFPPTrainer:
         self.logger.info(f"    实验组: {self.exp_group}")
         self.logger.info(f"    Rep: {self.rep_name}")
         self.logger.info(f"    样本数量: {self.num_sample}")
-        self.logger.info(f"    特征数量: {self.snp_dim}")
+        self.logger.info(f"    特征数量 (snp_dim): {self.snp_dim}")
         self.logger.info(
             f"    表型数量: {len(self.phenotype_names)} {self.phenotype_names}"
         )
         self.logger.info(f"    时间点数: {self.time_coordinates}")
         self.logger.info("    训练模式: 模拟数据常规训练 (预划分)")
+
+        self.logger.info("-" * 60)
+        self.logger.info("训练超参数:")
         self.logger.info(f"    epochs: {self.epochs}")
-        self.logger.info(f"    lr: {self.lr}")
-        self.logger.info(f"    weight_decay: {self.weight_decay}")
         self.logger.info(f"    batch_size: {self.batch_size}")
-        self.logger.info(f"    patience: {self.patience}")
+        self.logger.info(f"    accumulation_steps: {self.accumulation_steps}")
+        self.logger.info(f"    等效批量: {self.batch_size * self.accumulation_steps}")
+        self.logger.info(f"    lr: {self.lr}")
+        self.logger.info(f"    min_lr: {self.min_lr}")
+        self.logger.info(f"    weight_decay: {self.weight_decay}")
+        self.logger.info(f"    dropout: {self.dropout}")
         self.logger.info(f"    grad_clip_norm: {self.grad_clip_norm}")
+        self.logger.info(f"    patience: {self.patience}")
         self.logger.info(f"    seed: {self.seed}")
         self.logger.info(f"    device: {self.device}")
+        self.logger.info(f"    num_workers: {self.num_workers}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("学习率调度器:")
         self.logger.info(f"    use_warmup: {self.use_warmup}")
-        self.logger.info(f"    norm_method: {self.norm_method}")
-        self.logger.info(f"    scaler_type: {self.scaler_type}")
         if self.use_warmup:
             self.logger.info(f"    warmup_epochs: {self.warmup_epochs}")
+            self.logger.info(f"    warmup_start_factor: {self.warmup_start_factor}")
+            self.logger.info(f"    warmup_end_factor: {self.warmup_end_factor}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("损失函数与正则化:")
         self.logger.info(f"    loss_type: {self.loss_type}")
+        if self.loss_type in ("mse_pcc", "mse_offset"):
+            self.logger.info(f"    pcc_weight: {self.pcc_weight}")
         if self.loss_type == "mse_offset":
             self.logger.info(f"    offset_weight: {self.offset_weight}")
-            self.logger.info(f"    pcc_weight: {self.pcc_weight}")
-        elif self.loss_type == "mse_pcc":
-            self.logger.info(f"    pcc_weight: {self.pcc_weight}")
+        self.logger.info(f"    l1_wide_weight: {self.l1_wide_weight}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("数据预处理:")
+        self.logger.info(f"    norm_method: {self.norm_method}")
+        self.logger.info(f"    scaler_type: {self.scaler_type}")
+        self.logger.info(f"    screen_k: {self.config.screen_k}")
+        self.logger.info(f"    gwas_k: {self.config.gwas_k}")
+
+        self.logger.info("-" * 60)
         self.logger.info("模型配置:")
         self.logger.info(f"    snp_dim: {self.snp_dim}")
         self.logger.info(f"    d_model: {self.d_model}")
         self.logger.info(f"    num_heads: {self.num_heads}")
         self.logger.info(f"    num_layers: {self.num_layers}")
-        self.logger.info(f"    num_embeddings: {self.num_embeddings}")
         self.logger.info(f"    d_ff: {self.d_ff}")
+        self.logger.info(f"    num_embeddings: {self.num_embeddings}")
         self.logger.info(f"    degree: {self.degree}")
+        self.logger.info(f"    ablation_mode: {self.config.ablation_mode}")
         self.logger.info(f"    dropout: {self.dropout}")
+
+        self.logger.info("-" * 60)
         self.logger.info("数据文件:")
         self.logger.info(f"    train_snp_csv: {self.config.train_snp_csv}")
         self.logger.info(f"    train_pheno_csv: {self.config.train_pheno_csv}")
@@ -698,9 +736,13 @@ class SimTFPPTrainer:
         self.logger.info(f"    val_pheno_csv: {self.config.val_pheno_csv}")
         self.logger.info(f"    test_snp_csv: {self.config.test_snp_csv}")
         self.logger.info(f"    test_pheno_csv: {self.config.test_pheno_csv}")
+
+        self.logger.info("-" * 60)
         self.logger.info("路径配置:")
         self.logger.info(f"    model_save_dir: {self.best_model_save_dir}")
         self.logger.info(
             f"    training_history_save_dir: {self.training_history_save_dir}"
         )
-        self.logger.info(f"    phenotype_scaler_dir: {self.scaler_save_dir}")
+        self.logger.info(f"    scaler_save_dir: {self.scaler_save_dir}")
+        self.logger.info(f"    log_file: {self.log_file}")
+        self.logger.info("=" * 60)

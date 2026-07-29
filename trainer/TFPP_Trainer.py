@@ -17,11 +17,13 @@ from model import TFPP
 from trainer._scheduler import WarmupSequentialLR
 from utils import (
     Logger,
+    MSEOffsetLoss,
     MSEPCCLoss,
     calculate_metrics_by_average,
     calculate_phenotype_metrics_by_time,
     denormalize_phenotype,
     load_scalers,
+    save_model_config,
     save_scalers,
 )
 
@@ -80,6 +82,10 @@ class TFPPTrainer:
         self.scaler_type = config.scaler_type
         self.seed = config.seed
 
+        # 日志记录器（在筛选前创建，使筛选日志也写入同一文件）
+        self.log_file = self.config.log_file
+        self.logger = Logger(self.log_file, unique=False)
+
         # SNP 特征筛选（在划分前对全量数据执行，筛选后再创建模型）
         self.screen_k = config.screen_k
         self.gwas_k = config.gwas_k
@@ -100,15 +106,12 @@ class TFPPTrainer:
                 screen_k=self.screen_k,
                 gwas_k=self.gwas_k,
                 cache_key=cache_key,
+                logger=self.logger,
             )
             if screened_idx is not None:
                 self.dataset.snp = self.dataset.snp[:, screened_idx]
 
         self.snp_dim: int = self.dataset.snp.shape[1]
-
-        # 日志记录器
-        self.log_file = self.config.log_file
-        self.logger = Logger(self.log_file, unique=False)
 
         # 训练超参数
         self.epochs = config.epochs
@@ -135,6 +138,12 @@ class TFPPTrainer:
 
         # 是否保存训练信息
         self.is_save_training_info = config.is_save_training_info
+
+        # 损失函数
+        self.loss_type = config.loss_type
+        self.offset_weight = config.offset_weight
+        self.pcc_weight = config.pcc_weight
+        self.l1_wide_weight = config.l1_wide_weight
 
         # 模型配置
         self.d_model = config.d_model
@@ -175,15 +184,25 @@ class TFPPTrainer:
         """
         return TFPPDataset(self.snp_file, self.pheno_dir, self.phenotype_names)
 
-    def _create_optimizer_and_scheduler(self):
-        """
-        创建优化器：实现分层学习率 + 分层权重衰减
-        """
-        base_lr = self.lr
+    def _create_loss(self):
+        """根据配置创建损失函数。"""
+        if self.loss_type == "mse":
+            return nn.MSELoss()
+        elif self.loss_type == "mse_pcc":
+            return MSEPCCLoss(pcc_weight=self.pcc_weight)
+        elif self.loss_type == "mse_offset":
+            return MSEOffsetLoss(
+                offset_weight=self.offset_weight,
+                pcc_weight=self.pcc_weight,
+            )
+        else:
+            raise ValueError(f"未知 loss_type: {self.loss_type}")
 
-        # 建议：如果 Config 支持，最好将这两个比例也放到 config 中
+    def _create_optimizer_and_scheduler(self):
+        """创建优化器与学习率调度器"""
+        base_lr = self.lr
         wide_lr_scale = 0.1
-        wide_wd_scale = 100.0
+        wide_wd_scale = 1.0
 
         wide_params = []
         deep_params = []
@@ -211,8 +230,6 @@ class TFPPTrainer:
             ]
         )
 
-        # 安全设定：多组不同 LR 时，安全起见 eta_min 设为 0，防止小 LR 组反向放大
-        safe_eta_min = 0.0
         if self.use_warmup:
             warmup_scheduler = LinearLR(
                 optimizer,
@@ -221,10 +238,10 @@ class TFPPTrainer:
                 total_iters=self.warmup_epochs,
             )
             main_scheduler = CosineAnnealingLR(
-                optimizer, T_max=self.epochs - self.warmup_epochs, eta_min=safe_eta_min
+                optimizer,
+                T_max=max(1, self.epochs - self.warmup_epochs),
+                eta_min=self.min_lr,
             )
-            # 使用 WarmupSequentialLR 将 warmup 和 main_scheduler 无缝拼接
-            # (本仓库自带的轻量 wrapper, 与 SequentialLR 行为等价, 但避免上游 EPOCH_DEPRECATION_WARNING)
             scheduler = WarmupSequentialLR(
                 optimizer,
                 schedulers=[warmup_scheduler, main_scheduler],
@@ -232,10 +249,9 @@ class TFPPTrainer:
             )
         else:
             scheduler = CosineAnnealingLR(
-                optimizer, T_max=self.epochs, eta_min=safe_eta_min
+                optimizer, T_max=self.epochs, eta_min=self.min_lr
             )
 
-        # 改进：无论是否有 warmup，都只返回 optimizer 和一个统一的 scheduler
         return optimizer, scheduler
 
     def _train_epoch(
@@ -273,6 +289,22 @@ class TFPPTrainer:
 
             phenotype_pred = self.model(X)
             loss = criterion(phenotype_pred, y)
+
+            # L1 稀疏惩罚: 对宽通路参数施加 L1 正则
+            if self.l1_wide_weight > 0 and hasattr(self.model, "wide_layer"):
+                l1_penalty = 0.0
+                wide_layer = self.model.wide_layer
+                if hasattr(wide_layer, "snp_importance"):
+                    l1_penalty = l1_penalty + wide_layer.snp_importance.abs().sum()
+                if hasattr(wide_layer, "base_linear"):
+                    l1_penalty = l1_penalty + wide_layer.base_linear.weight.abs().sum()
+                if hasattr(wide_layer, "dynamic_linear"):
+                    l1_penalty = (
+                        l1_penalty + wide_layer.dynamic_linear.weight.abs().sum()
+                    )
+                if hasattr(wide_layer, "poly_linear"):
+                    l1_penalty = l1_penalty + wide_layer.poly_linear.weight.abs().sum()
+                loss = loss + self.l1_wide_weight * l1_penalty
 
             # 损失按累积步数缩放, 反传到累积梯度上 (保证梯度量级与等效大 batch 一致)
             loss_scaled = loss / self.accumulation_steps
@@ -462,9 +494,9 @@ class TFPPTrainer:
         dict[str, Any]
             训练统计信息字典。
         """
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
         self.logger.info("常规训练")
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
 
         # 输出配置信息
         self._log_configuration()
@@ -492,7 +524,7 @@ class TFPPTrainer:
         # 创建优化器和调度器
         optimizer, scheduler = self._create_optimizer_and_scheduler()
 
-        criterion = MSEPCCLoss()
+        criterion = self._create_loss()
 
         # 训练状态跟踪
         best_val_loss = float("inf")
@@ -595,9 +627,9 @@ class TFPPTrainer:
         print()
 
         # 在测试集上评估
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
         self.logger.info("测试集评估")
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
 
         # 加载最佳模型
         self.model.load_state_dict(best_model_state)
@@ -732,6 +764,19 @@ class TFPPTrainer:
         torch.save(cpu_model_state, model_path)
         self.logger.info(f"【模型权重】已保存至: {model_path}")
 
+        # 保存模型结构配置 (供 load_tfpp_model 直接读取)
+        save_model_config(self.config, self.config.output_dir)
+        # 补写筛选后的实际 snp_dim
+        import json as _json
+
+        _cfg_path = Path(self.config.output_dir) / "model_config.json"
+        if _cfg_path.exists():
+            with open(_cfg_path, "r", encoding="utf-8") as _f:
+                _mc = _json.load(_f)
+            _mc["snp_dim"] = self.snp_dim
+            with open(_cfg_path, "w", encoding="utf-8") as _f:
+                _json.dump(_mc, _f, ensure_ascii=False, indent=2)
+
         # ==========================================
         # 2. 保存训练摘要与配置元数据 (.json)
         # ==========================================
@@ -842,16 +887,16 @@ class TFPPTrainer:
         dict[str, Any]
             该折的训练结果字典。
         """
-        self.logger.info(f"{'=' * 80}")
+        self.logger.info(f"{'=' * 60}")
         self.logger.info(f"开始训练第 {fold_idx + 1}/{self.n_folds} 折")
-        self.logger.info(f"{'=' * 80}")
+        self.logger.info(f"{'=' * 60}")
 
         # 重新初始化模型（每折使用新模型）
         self.model = self._create_model()
 
         # 创建优化器和调度器
         optimizer, scheduler = self._create_optimizer_and_scheduler()
-        criterion = MSEPCCLoss()
+        criterion = self._create_loss()
 
         # 训练状态跟踪
         best_val_loss = float("inf")
@@ -1107,9 +1152,9 @@ class TFPPTrainer:
         total_time = time.time() - total_start_time
 
         # ========== 输出K折交叉验证总结 ==========
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
         self.logger.info(f"{self.n_folds}折交叉验证完成!")
-        self.logger.info("=" * 80)
+        self.logger.info("=" * 60)
         self.logger.info(f"总耗时: {total_time / 60:.2f} 分钟")
         self.logger.info(f"平均每折耗时: {total_time / self.n_folds / 60:.2f} 分钟")
         print()
@@ -1237,9 +1282,9 @@ class TFPPTrainer:
         # 保存K折摘要信息
         summary_path = self.training_history_save_dir / "kfold_summary.txt"
         with open(summary_path, "w", encoding="utf-8") as f:
-            f.write(f"{'=' * 80}\n")
+            f.write(f"{'=' * 60}\n")
             f.write(f"{self.n_folds}折交叉验证摘要\n")
-            f.write(f"{'=' * 80}\n\n")
+            f.write(f"{'=' * 60}\n\n")
             f.write(f"总训练时间: {total_time / 60:.2f} 分钟\n")
             f.write(f"平均每折时间: {total_time / self.n_folds / 60:.2f} 分钟\n\n")
 
@@ -1276,10 +1321,11 @@ class TFPPTrainer:
 
     def _log_configuration(self) -> None:
         """记录配置信息"""
+        self.logger.info("=" * 60)
         self.logger.info("训练配置:")
         self.logger.info(f"    实验名称: {self.exp_name}")
         self.logger.info(f"    样本数量: {self.num_sample}")
-        self.logger.info(f"    特征数量: {self.snp_dim}")
+        self.logger.info(f"    特征数量 (snp_dim): {self.snp_dim}")
         self.logger.info(
             f"    表型数量: {len(self.phenotype_names)} {self.phenotype_names}"
         )
@@ -1290,29 +1336,63 @@ class TFPPTrainer:
         if self.use_kfold:
             self.logger.info(f"    折数: {self.n_folds}")
         else:
-            self.logger.info(f"    test_ratio: {self.test_ratio}")
+            self.logger.info(f"    train_ratio: {self.train_ratio}")
             self.logger.info(f"    val_ratio: {self.val_ratio}")
+            self.logger.info(f"    test_ratio: {self.test_ratio}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("训练超参数:")
         self.logger.info(f"    epochs: {self.epochs}")
-        self.logger.info(f"    lr: {self.lr}")
-        self.logger.info(f"    weight_decay: {self.weight_decay}")
         self.logger.info(f"    batch_size: {self.batch_size}")
-        self.logger.info(f"    patience: {self.patience}")
+        self.logger.info(f"    accumulation_steps: {self.accumulation_steps}")
+        self.logger.info(f"    等效批量: {self.batch_size * self.accumulation_steps}")
+        self.logger.info(f"    lr: {self.lr}")
+        self.logger.info(f"    min_lr: {self.min_lr}")
+        self.logger.info(f"    weight_decay: {self.weight_decay}")
+        self.logger.info(f"    dropout: {self.dropout}")
         self.logger.info(f"    grad_clip_norm: {self.grad_clip_norm}")
+        self.logger.info(f"    patience: {self.patience}")
         self.logger.info(f"    seed: {self.seed}")
         self.logger.info(f"    device: {self.device}")
+        self.logger.info(f"    num_workers: {self.num_workers}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("学习率调度器:")
         self.logger.info(f"    use_warmup: {self.use_warmup}")
-        self.logger.info(f"    norm_method: {self.norm_method}")
-        self.logger.info(f"    scaler_type: {self.scaler_type}")
         if self.use_warmup:
             self.logger.info(f"    warmup_epochs: {self.warmup_epochs}")
+            self.logger.info(f"    warmup_start_factor: {self.warmup_start_factor}")
+            self.logger.info(f"    warmup_end_factor: {self.warmup_end_factor}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("损失函数与正则化:")
+        self.logger.info(f"    loss_type: {self.loss_type}")
+        if self.loss_type in ("mse_pcc", "mse_offset"):
+            self.logger.info(f"    pcc_weight: {self.pcc_weight}")
+        if self.loss_type == "mse_offset":
+            self.logger.info(f"    offset_weight: {self.offset_weight}")
+        self.logger.info(f"    l1_wide_weight: {self.l1_wide_weight}")
+
+        self.logger.info("-" * 60)
+        self.logger.info("数据预处理:")
+        self.logger.info(f"    norm_method: {self.norm_method}")
+        self.logger.info(f"    scaler_type: {self.scaler_type}")
+        self.logger.info(f"    screen_k: {self.screen_k}")
+        self.logger.info(f"    gwas_k: {self.gwas_k}")
+
+        self.logger.info("-" * 60)
         self.logger.info("模型配置:")
         self.logger.info(f"    snp_dim: {self.snp_dim}")
         self.logger.info(f"    d_model: {self.d_model}")
         self.logger.info(f"    num_heads: {self.num_heads}")
         self.logger.info(f"    num_layers: {self.num_layers}")
-        self.logger.info(f"    num_embeddings: {self.num_embeddings}")
         self.logger.info(f"    d_ff: {self.d_ff}")
+        self.logger.info(f"    num_embeddings: {self.num_embeddings}")
+        self.logger.info(f"    degree: {self.degree}")
+        self.logger.info(f"    ablation_mode: {self.ablation_mode}")
         self.logger.info(f"    dropout: {self.dropout}")
+
+        self.logger.info("-" * 60)
         self.logger.info("路径配置:")
         self.logger.info(f"    snp_file: {self.snp_file}")
         self.logger.info(f"    pheno_dir: {self.pheno_dir}")
@@ -1320,4 +1400,6 @@ class TFPPTrainer:
         self.logger.info(
             f"    training_history_save_dir: {self.training_history_save_dir}"
         )
-        self.logger.info(f"    phenotype_scaler_dir: {self.scaler_save_dir}")
+        self.logger.info(f"    scaler_save_dir: {self.scaler_save_dir}")
+        self.logger.info(f"    log_file: {self.log_file}")
+        self.logger.info("=" * 60)

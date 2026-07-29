@@ -34,7 +34,7 @@ class TFPPConfig(BaseModel):
     epochs: int = Field(default=100, ge=1, le=500)
     lr: float = Field(default=0.0001, gt=0)
     weight_decay: float = 0.0001
-    min_lr: float = 1e-7
+    min_lr: float = 1e-6
     batch_size: int = Field(default=32, ge=1, multiple_of=2)
     patience: int = 10
     seed: int = 73
@@ -52,13 +52,13 @@ class TFPPConfig(BaseModel):
     warmup_end_factor: float = 1.0  # 持续增长到 base_lr * 1.0
 
     # 模型参数
-    d_model: int = 64
+    d_model: int = 32
     num_heads: int = 4
-    num_layers: int = 2  # 编码器层数
+    num_layers: int = 1  # 编码器层数
     num_embeddings: int = 4  # 嵌入层维度
-    d_ff: int = 256  # 前馈网络隐藏维度
+    d_ff: int = 128  # 前馈网络隐藏维度
     degree: int = Field(
-        default=3,
+        default=5,
         ge=0,
         description="Legendre 多项式阶数, 0=退化为纯加性(仅常数项)",
     )
@@ -101,7 +101,7 @@ class TFPPConfig(BaseModel):
     train_ratio: float = 0.8
     test_ratio: float = 0.1
     val_ratio: float = 0.1
-    num_workers: int = 4
+    num_workers: int = 8
 
     # SNP 特征筛选参数 (0=不筛选)
     screen_k: int = Field(
@@ -115,9 +115,21 @@ class TFPPConfig(BaseModel):
         description="GWAS 筛选保留的 SNP 数目, 0=跳过",
     )
 
+    # 损失函数
+    loss_type: str = Field(
+        default="mse",
+        pattern="^(mse|mse_pcc|mse_offset)$",
+        description="mse=纯MSE, mse_pcc=MSE+PCC, mse_offset=MSE+个体偏移MSE",
+    )
+    offset_weight: float = 0.5
+    pcc_weight: float = 0.0
+
+    # L1 稀疏正则化 (宽通路)
+    l1_wide_weight: float = 1e-5  # L1 惩罚系数, 0=关闭
+
     # 规范字符串输入
     norm_method: str = Field(
-        default="global",
+        default="residual_global",
         pattern="^(global|timepoint|residual_global)$",
         description="仅支持 global, timepoint, residual_global",
     )

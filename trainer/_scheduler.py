@@ -48,13 +48,14 @@ class WarmupSequentialLR(_LRScheduler):
         self.last_epoch = last_epoch + 1
         self._step_count = 0
         init_lrs = self.get_lr()
-        for group, lr in zip(self.optimizer.param_groups, init_lrs):
+        for group, lr in zip(self.optimizer.param_groups, init_lrs, strict=True):
             group["lr"] = lr
         self._last_lr = init_lrs
 
     # === 与 _LRScheduler 接口保持一致 ===
+
     @property
-    def base_lrs(self):
+    def base_lrs(self) -> list[float]:  # type: ignore[override]
         """返回各参数组的基础学习率列表。"""
         return self._warmup.base_lrs
 
@@ -105,6 +106,6 @@ class WarmupSequentialLR(_LRScheduler):
         self._step_count += 1
         self.last_epoch += 1
         new_lrs = self.get_lr()
-        for group, lr in zip(self.optimizer.param_groups, new_lrs):
+        for group, lr in zip(self.optimizer.param_groups, new_lrs, strict=True):
             group["lr"] = lr
         self._last_lr = new_lrs

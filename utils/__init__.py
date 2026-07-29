@@ -4,6 +4,7 @@ from .Calculate_Metrics import (
 )
 from .Logger import Logger
 from .Loss import MSEOffsetLoss, MSEPCCLoss
+from .model_loader import load_tfpp_model, save_model_config
 from .Normalization import (
     NORM_FUNC_REGISTRY,
     SCALER_REGISTRY,
@@ -30,6 +31,8 @@ __all__ = [
     "compute_cache_key",
     "denormalize_phenotype",
     "load_scalers",
+    "load_tfpp_model",
+    "save_model_config",
     "save_scalers",
     "screen_snps",
 ]

@@ -12,7 +12,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY, screen_snps
+from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY
 
 
 def to_tensor(x):
@@ -260,16 +260,13 @@ def get_dataloader(
     seed: int = 73,
     device: str = "cpu",
     num_workers: int = 8,
-    screen_k: int = 0,
-    gwas_k: int = 0,
-    cache_key: str | None = None,
-    cache_dir: str = "dataset/screen_cache",
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
     """根据比例划分数据集并构建训练/验证/测试 DataLoader。
 
-    使用 ``random_split`` 对数据集索引进行互斥划分，可选地执行 SNP 特征筛选
-    （仅用训练集计算，索引应用到 val/test，避免数据泄露），然后对表型数据
+    使用 ``random_split`` 对数据集索引进行互斥划分，对表型数据
     执行归一化（仅用训练集拟合 scaler），最终构建三组 DataLoader。
+
+    注意: SNP 特征筛选由上层 Trainer 在数据划分前统一执行，本函数不再负责筛选。
 
     Parameters
     ----------
@@ -283,7 +280,6 @@ def get_dataloader(
         - ``'global'``: 整个表型统一归一化
         - ``'timepoint'``: 每个时间点独立归一化
         - ``'residual_global'``: 减均值后整个表型归一化
-        - ``'residual_timepoint'``: 减均值后每个时间点独立归一化
 
     scaler_type : str
         缩放器类型（``'zscore'``、``'minmax'``、``'robust'``）。
@@ -299,14 +295,6 @@ def get_dataloader(
         训练设备标识，默认 ``'cpu'``。
     num_workers : int, optional
         DataLoader 的数据加载线程数，默认 ``8``。
-    screen_k : int, optional
-        DC-SIS 筛选保留的 SNP 数目，``0`` 表示跳过，默认 ``0``。
-    gwas_k : int, optional
-        GWAS 筛选保留的 SNP 数目，``0`` 表示跳过，默认 ``0``。
-    cache_key : str | None, optional
-        筛选缓存哈希键，传入时启用磁盘缓存，默认 ``None``。
-    cache_dir : str, optional
-        缓存文件存放目录，默认 ``'outputs/screen_cache'``。
 
     Returns
     -------
@@ -347,21 +335,7 @@ def get_dataloader(
         phenotype_data[test_subset.indices],
     )
 
-    # 2. SNP 特征筛选（仅用训练集计算，索引应用到 val/test，避免数据泄露）
-    screened_idx = screen_snps(
-        train_snp,
-        train_phenotype,
-        screen_k=screen_k,
-        gwas_k=gwas_k,
-        cache_key=cache_key,
-        cache_dir=cache_dir,
-    )
-    if screened_idx is not None:
-        train_snp = train_snp[:, screened_idx]
-        val_snp = val_snp[:, screened_idx]
-        test_snp = test_snp[:, screened_idx]
-
-    # 3. 归一化表型
+    # 2. 归一化表型
     train_phe_norm, val_phe_norm, test_phe_norm, pheno_meta = _apply_normalization(
         train_phenotype,
         val_phenotype,
@@ -371,7 +345,7 @@ def get_dataloader(
         scaler_type,
     )
 
-    # 4. 调用公共 DataLoader 构建逻辑
+    # 3. 调用公共 DataLoader 构建逻辑
     return _build_dataloaders_and_scalers(
         train_snp,
         train_phe_norm,
@@ -398,16 +372,13 @@ def get_dataloader_with_kfold(
     norm_method: str,
     scaler_type: str,
     num_workers: int = 4,
-    screen_k: int = 0,
-    gwas_k: int = 0,
-    cache_key: str | None = None,
-    cache_dir: str = "dataset/screen_cache",
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
     """基于 KFold 预划分的索引构建训练/验证/测试 DataLoader。
 
     接收外部 KFold 划分好的索引列表，提取对应的 SNP 和表型数据，
-    可选地执行 SNP 特征筛选（仅用训练集计算，索引应用到 val/test），
     执行归一化（仅用训练集拟合 scaler）后构建三组 DataLoader。
+
+    注意: SNP 特征筛选由上层 Trainer 在数据划分前统一执行，本函数不再负责筛选。
 
     Parameters
     ----------
@@ -429,20 +400,11 @@ def get_dataloader_with_kfold(
         - ``'global'``: 整个表型统一归一化
         - ``'timepoint'``: 每个时间点独立归一化
         - ``'residual_global'``: 减均值后整个表型归一化
-        - ``'residual_timepoint'``: 减均值后每个时间点独立归一化
 
     scaler_type : str
         缩放器类型（``'zscore'``、``'minmax'``、``'robust'``）。
     num_workers : int, optional
         DataLoader 的数据加载线程数，默认 ``4``。
-    screen_k : int, optional
-        DC-SIS 筛选保留的 SNP 数目，``0`` 表示跳过，默认 ``0``。
-    gwas_k : int, optional
-        GWAS 筛选保留的 SNP 数目，``0`` 表示跳过，默认 ``0``。
-    cache_key : str | None, optional
-        筛选缓存哈希键，传入时启用磁盘缓存，默认 ``None``。
-    cache_dir : str, optional
-        缓存文件存放目录，默认 ``'outputs/screen_cache'``。
 
     Returns
     -------
@@ -455,30 +417,15 @@ def get_dataloader_with_kfold(
     scalers : dict
         包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
-    # ===================== 1. 划分数据集 =====================
+    # 1. 提取各数据集的SNP和表型数据
     snp_data = dataset.snp
     phenotype_data = dataset.phenotype
 
-    # 1. 提取各数据集的SNP和表型数据
     train_snp, train_phenotype = snp_data[train_indices], phenotype_data[train_indices]
     val_snp, val_phenotype = snp_data[val_indices], phenotype_data[val_indices]
     test_snp, test_phenotype = snp_data[test_indices], phenotype_data[test_indices]
 
-    # 2. SNP 特征筛选（仅用训练集计算，索引应用到 val/test，避免数据泄露）
-    screened_idx = screen_snps(
-        train_snp,
-        train_phenotype,
-        screen_k=screen_k,
-        gwas_k=gwas_k,
-        cache_key=cache_key,
-        cache_dir=cache_dir,
-    )
-    if screened_idx is not None:
-        train_snp = train_snp[:, screened_idx]
-        val_snp = val_snp[:, screened_idx]
-        test_snp = test_snp[:, screened_idx]
-
-    # ===================== 3. 归一化表型 =====================
+    # 2. 归一化表型
     train_phe_norm, val_phe_norm, test_phe_norm, pheno_meta = _apply_normalization(
         train_phenotype,
         val_phenotype,
@@ -488,7 +435,7 @@ def get_dataloader_with_kfold(
         scaler_type,
     )
 
-    # 4. 调用公共 DataLoader 构建逻辑
+    # 3. 调用公共 DataLoader 构建逻辑
     return _build_dataloaders_and_scalers(
         train_snp,
         train_phe_norm,
