@@ -42,6 +42,3 @@ explicit = true
 [tool.deptry.package_module_name_map]
 scikit-learn = "sklearn"
 opencv-python-headless = "cv2"
-
-[dependency-groups]
-dev = ["ruff>=0.16.0"]
