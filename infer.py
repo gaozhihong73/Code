@@ -1,3 +1,12 @@
+"""DynaGS: TFPP 模型推理脚本。
+
+支持两种预测模式:
+1. 外部文件模式: 传入 --input_snp 指定待预测的 SNP 数据 (.npy)
+2. 测试集模式: 不传 --input_snp, 自动复现训练时的测试集进行预测
+
+模型结构参数通过 utils/model_loader.py 自动从 checkpoint 推测, 无需手动指定。
+"""
+
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -7,33 +16,41 @@ import pandas as pd
 import torch
 
 from dataloader.TFPP_DataLoader import TFPPDataset, get_dataloader
-from model.TFPP import TFPP
-from utils import denormalize_phenotype, load_scalers
-
-
-def _str_to_bool(s: str) -> bool:
-    """将 'true'/'false' 字符串正确解析为布尔值。"""
-    return s.strip().lower() == "true"
+from utils import (
+    compute_cache_key,
+    denormalize_phenotype,
+    load_scalers,
+    load_tfpp_model,
+    screen_snps,
+)
 
 
 def parse_args():
     """解析推理脚本的命令行参数。"""
     parser = argparse.ArgumentParser(
-        description="DynaGS: TFPP 模型预测脚本 (支持外部文件或默认测试集)"
+        description="DynaGS: TFPP 模型推理脚本 (支持外部文件或默认测试集)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # ================= 核心必填路径 =================
     parser.add_argument(
         "--model_path",
         type=str,
-        default="outputs/tfpp/maize_data/models/best_model.pt",
-        help="训练好的模型文件路径 (.pt)",
+        required=True,
+        help=(
+            "训练好的模型路径。支持两种形式: "
+            "1) 实验目录 (如 outputs/tfpp/exp_name), 自动定位 models/best_model.pt; "
+            "2) 直接指定 .pt 文件路径"
+        ),
     )
     parser.add_argument(
         "--scaler_path",
         type=str,
-        default="outputs/tfpp/maize_data/scalers/scaler.pkl",
-        help="归一化器文件路径 (.pkl)",
+        default=None,
+        help=(
+            "归一化器文件路径 (.pkl)。若不指定, 自动从 --model_path 推导: "
+            "{exp_dir}/scalers/scaler.pkl"
+        ),
     )
 
     # ================= 预测模式控制 =================
@@ -41,96 +58,89 @@ def parse_args():
         "--input_snp",
         type=str,
         default=None,
-        help="外部待预测的 SNP 数据路径 (.npy)。如果不传入此项，则默认预测训练时的测试集",
+        help=(
+            "外部待预测的 SNP 数据路径 (.npy, 形状 [样本数, SNP数])。"
+            "若不传入此项, 则自动复现训练时的测试集进行预测"
+        ),
     )
     parser.add_argument(
         "--output",
         type=str,
-        default=f"outputs/infer/inference_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}.csv",
-        help="预测结果保存路径",
+        default=None,
+        help="预测结果 CSV 保存路径。默认自动生成: outputs/infer/inference_YYYYMMDD_HHMMSS.csv",
     )
 
-    # ================= 数据划分配置 (当不传入 input_snp 时用于复现测试集) =================
+    # ================= 测试集复现参数 (不传 --input_snp 时使用) =================
     parser.add_argument(
         "--snp_file",
         type=str,
         default="dataset/maize/snp/snp_50000.npy",
-        help="训练时的 SNP 数据文件",
+        help="训练时使用的 SNP 数据文件路径 (需与训练时一致以复现相同的数据划分)",
     )
     parser.add_argument(
         "--pheno_dir",
         type=str,
         default="dataset/maize/cleaned_pheno",
-        help="训练时的表型数据目录",
+        help="训练时使用的表型数据目录 (需与训练时一致)",
     )
     parser.add_argument(
-        "--test_ratio", type=float, default=0.1, help="测试集比例 (需与训练时一致)"
+        "--train_ratio",
+        type=float,
+        default=0.8,
+        help="训练集比例 (需与训练时一致, 用于复现相同的数据划分)",
     )
     parser.add_argument(
-        "--val_ratio", type=float, default=0.1, help="验证集比例 (需与训练时一致)"
+        "--val_ratio",
+        type=float,
+        default=0.1,
+        help="验证集比例 (需与训练时一致)",
     )
     parser.add_argument(
-        "--seed", type=int, default=73, help="随机种子 (需与训练时一致)"
+        "--test_ratio",
+        type=float,
+        default=0.1,
+        help="测试集比例 (需与训练时一致)",
     )
     parser.add_argument(
-        "--norm_method",
-        type=str,
-        default="global",
-        choices=["global", "timepoint", "residual_global"],
-        help="归一化策略 (需与训练时一致)",
+        "--seed",
+        type=int,
+        default=73,
+        help="随机种子 (必须与训练时一致, 否则数据划分不同导致测试集不匹配)",
     )
     parser.add_argument(
         "--scaler_type",
         type=str,
         default="zscore",
         choices=["zscore", "minmax", "robust"],
-        help="归一化缩放器类型 (需与训练时一致)",
+        help="归一化缩放器类型 (需与训练时一致, 影响测试集的归一化方式)",
+    )
+
+    # ================= SNP 特征筛选 (需与训练时一致) =================
+    parser.add_argument(
+        "--screen_k",
+        type=int,
+        default=10000,
+        help="DC-SIS 筛选保留的 SNP 数目 (需与训练时一致, 0=训练时未筛选)",
+    )
+    parser.add_argument(
+        "--gwas_k",
+        type=int,
+        default=10000,
+        help="GWAS 筛选保留的 SNP 数目 (需与训练时一致, 0=训练时未筛选)",
     )
 
     # ================= 推理运行时参数 =================
-    parser.add_argument("--batch_size", type=int, default=32, help="推理批次大小")
-    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader 工作线程数")
     parser.add_argument(
-        "--pheno_names",
-        type=str,
-        nargs="+",
-        default=None,
-        help="可选: 显式指定表型名称列表 (覆盖 scaler 中记录的值; 仅当与训练时完全一致时使用)",
-    )
-
-    # ================= 模型结构参数 (需与训练时一致) =================
-    parser.add_argument(
-        "--time_coordinates",
-        type=float,
-        nargs="+",
-        default=[10, 12, 14, 15, 17, 19, 24, 26, 37, 44, 51, 65, 80, 101],
-        help="采样时间点坐标列表",
-    )
-    parser.add_argument("--d_model", type=int, default=64, help="Transformer 隐藏维度")
-    parser.add_argument("--num_heads", type=int, default=4, help="多头注意力机制的头数")
-    parser.add_argument("--num_layers", type=int, default=2, help="编码器层数 (网络深度)")
-    parser.add_argument("--d_ff", type=int, default=256, help="前馈网络隐藏层维度")
-    parser.add_argument(
-        "--num_embeddings",
+        "--batch_size",
         type=int,
-        default=4,
-        help="SNP 类别嵌入维度 (需与训练时一致)",
+        default=32,
+        help="推理批次大小 (不影响结果, 仅影响显存占用和速度)",
     )
     parser.add_argument(
-        "--degree",
+        "--num_workers",
         type=int,
-        default=3,
-        help="Legendre 多项式阶数 (需与训练时一致)",
-    )
-    parser.add_argument(
-        "--ablation_mode",
-        type=str,
-        default="none",
-        choices=["none", "wide", "deep", "add"],
-        help="模型消融模式 (需与训练时一致)",
-    )
-    parser.add_argument(
-        "--dropout", type=float, default=0.0, help="推理时的 Dropout (通常保持 0.0)"
+        default=8,
+        help="DataLoader 工作线程数",
     )
 
     return parser.parse_args()
@@ -142,68 +152,103 @@ def predict():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     Path("outputs/infer").mkdir(parents=True, exist_ok=True)
 
-    # 1. 加载归一化器信息
+    output_path = args.output or (
+        f"outputs/infer/inference_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+
+    # 自动推导 scaler_path: {exp_dir}/scalers/scaler.pkl
+    if args.scaler_path is None:
+        model_p = Path(args.model_path)
+        exp_dir = model_p if model_p.is_dir() else model_p.parent.parent
+        args.scaler_path = str(exp_dir / "scalers" / "scaler.pkl")
+
+    # 1. 加载模型 (自动推测结构参数)
+    print(f"[*] 正在加载模型: {args.model_path}")
+    model, model_info = load_tfpp_model(args.model_path, device=str(device))
+    phenotype_names = model_info["phenotype_names"]
+    print(
+        f"[*] 模型结构: d_model={model_info['d_model']}, "
+        f"num_layers={model_info['num_layers']}, "
+        f"degree={model_info['degree']}, "
+        f"ablation_mode={model_info['ablation_mode']}"
+    )
+    print(f"[*] 表型列表: {phenotype_names}")
+
+    # 2. 加载归一化器
     print(f"[*] 正在加载归一化器: {args.scaler_path}")
     scalers_pkg = load_scalers(args.scaler_path)
-    phenotype_names = (
-        args.pheno_names if args.pheno_names is not None else scalers_pkg["phenotype_names"]
-    )
     norm_method = scalers_pkg["norm_method"]
+    print(f"[*] 归一化策略: {norm_method}")
 
-    # 2. 判断输入模式以获取 SNP 维度
+    # 3. 准备数据
     if args.input_snp:
-        print(f"[*] 检测到外部输入文件: {args.input_snp}")
+        # 模式 A: 外部文件预测
+        print(f"[*] 外部输入模式: {args.input_snp}")
         if not Path(args.input_snp).exists():
-            raise FileNotFoundError(f"SNP文件不存在: {args.input_snp}")
+            raise FileNotFoundError(f"SNP 文件不存在: {args.input_snp}")
         external_snp_data = np.load(args.input_snp)
         snp_dim = external_snp_data.shape[1]
+        expected_dim = model_info["snp_dim"]
+        if snp_dim != expected_dim:
+            raise ValueError(
+                f"外部 SNP 维度 ({snp_dim}) 与模型期望维度 ({expected_dim}) 不匹配。"
+                f"请确认数据经过相同的特征筛选 (screen_k={args.screen_k}, gwas_k={args.gwas_k})"
+            )
         test_loader = None
     else:
-        print(f"[*] 未检测到外部输入文件，将复现测试集进行预测 (Seed: {args.seed})...")
+        # 模式 B: 复现训练时的测试集
+        print(f"[*] 测试集模式: 复现训练时的数据划分 (seed={args.seed})...")
         dataset = TFPPDataset(args.snp_file, args.pheno_dir, phenotype_names)
+
+        # 与训练时相同的 SNP 筛选流程
+        if args.screen_k > 0 or args.gwas_k > 0:
+            cache_key = compute_cache_key(
+                snp_file=args.snp_file,
+                pheno_source=args.pheno_dir,
+                phenotype_names=phenotype_names,
+                screen_k=args.screen_k,
+                gwas_k=args.gwas_k,
+                seed=args.seed,
+            )
+            screened_idx = screen_snps(
+                dataset.snp,
+                dataset.phenotype,
+                screen_k=args.screen_k,
+                gwas_k=args.gwas_k,
+                cache_key=cache_key,
+            )
+            if screened_idx is not None:
+                dataset.snp = dataset.snp[:, screened_idx]
+
         snp_dim = dataset.snp.shape[1]
+        expected_dim = model_info["snp_dim"]
+        if snp_dim != expected_dim:
+            raise ValueError(
+                f"筛选后 SNP 维度 ({snp_dim}) 与模型期望维度 ({expected_dim}) 不匹配。"
+                f"请检查 --screen_k 和 --gwas_k 是否与训练时一致"
+            )
 
         _, _, test_loader, _ = get_dataloader(
             dataset=dataset,
             batch_size=args.batch_size,
             norm_method=norm_method,
             scaler_type=args.scaler_type,
+            train_ratio=args.train_ratio,
             test_ratio=args.test_ratio,
             val_ratio=args.val_ratio,
             seed=args.seed,
-            device=device.type,
+            device=str(device),
             num_workers=args.num_workers,
         )
-
-    # 3. 初始化模型结构并加载权重
-    print("[*] 正在初始化模型并加载权重...")
-    model = TFPP(
-        snp_dim=snp_dim,
-        d_model=args.d_model,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers,
-        d_ff=args.d_ff,
-        num_embeddings=args.num_embeddings,
-        time_coordinates=args.time_coordinates,
-        phenotype_names=phenotype_names,
-        dropout=args.dropout,
-        degree=args.degree,
-        ablation_mode=args.ablation_mode,
-    ).to(device)
-
-    checkpoint = torch.load(
-        args.model_path, map_location=device, weights_only=True
-    )
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    model.load_state_dict(state_dict)
-    model.eval()
+        if test_loader is None:
+            raise ValueError("测试集加载失败")
 
     # 4. 执行推理并反归一化
     results = []
 
     if args.input_snp:
-        # 模式 A: 预测外部文件
-        snp_tensor = torch.tensor(external_snp_data + 1, dtype=torch.float32).to(device)
+        # 外部文件: 编码值 +1 对齐嵌入层索引 (原始 0/1/2 → 1/2/3, 0 留给 padding)
+        snp_tensor = torch.tensor(external_snp_data + 1, dtype=torch.float32).to(device)  # type: ignore
         with torch.no_grad():
             preds_norm = model(snp_tensor)
 
@@ -216,13 +261,12 @@ def predict():
                 for t_idx in range(num_times):
                     row[f"T{t_idx + 1}"] = preds_denorm[i, p_idx, t_idx].item()
                 results.append(row)
-
     else:
-        # 模式 B: 预测内部测试集
+        # 测试集: 同时输出预测值和真实值
         all_preds = []
         all_targets = []
         with torch.no_grad():
-            for X, y in test_loader:
+            for X, y in test_loader:  # type: ignore
                 X = X.to(device)
                 preds_norm = model(X)
                 all_preds.append(preds_norm.cpu())
@@ -245,8 +289,11 @@ def predict():
 
     # 5. 保存结果
     df = pd.DataFrame(results)
-    df.to_csv(args.output, index=False)
-    print(f"[*] 预测完成！结果已保存至: {args.output}")
+    df.to_csv(output_path, index=False)
+    print(f"[*] 预测完成! 结果已保存至: {output_path}")
+    print(
+        f"[*] 共 {len(df)} 条记录 ({len(df) // len(phenotype_names)} 样本 × {len(phenotype_names)} 表型)"
+    )
 
 
 if __name__ == "__main__":

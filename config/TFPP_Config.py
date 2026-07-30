@@ -7,7 +7,11 @@
 from datetime import datetime
 
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def _default_exp_name() -> str:
+    return f"exp_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}"
 
 
 class TFPPConfig(BaseModel):
@@ -20,25 +24,28 @@ class TFPPConfig(BaseModel):
     """
 
     exp_name: str = Field(
-        default_factory=lambda: (
-            f"exp_{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}"
-        ),
-        description="实验名称，如果不指定则按时间自动生成",
+        default_factory=_default_exp_name,
+        description="实验名称，若不指定则自动按时间戳生成 (格式: exp_YYYYMMDD_HHMMSS)",
     )
+
+    @field_validator("exp_name", mode="before")
+    @classmethod
+    def _resolve_exp_name(cls, v):
+        return _default_exp_name() if v is None else v
 
     # 文件目录
     pheno_dir: str = "dataset/maize/cleaned_pheno"
     snp_file: str = "dataset/maize/snp/snp_50000.npy"
 
     # 训练参数
-    epochs: int = Field(default=100, ge=1, le=500)
+    epochs: int = Field(default=200, ge=1, le=500)
     lr: float = Field(default=0.0001, gt=0)
     weight_decay: float = 0.0001
-    min_lr: float = 1e-6
+    min_lr: float = 1e-7
     batch_size: int = Field(default=32, ge=1, multiple_of=2)
-    patience: int = 10
+    patience: int = 20
     seed: int = 73
-    dropout: float = 0.3
+    dropout: float = 0.25
     grad_clip_norm: float = 1.0
     is_save_training_info: bool = True  # 是否保存训练好的模型到本地
     device: str = Field(
@@ -94,7 +101,7 @@ class TFPPConfig(BaseModel):
     )
 
     # K折交叉验证参数
-    use_kfold: bool = True  # 是否使用K折交叉验证
+    use_kfold: bool = False  # 是否使用K折交叉验证
     n_folds: int = 10  # K折数量
 
     # 数据集参数
@@ -105,12 +112,12 @@ class TFPPConfig(BaseModel):
 
     # SNP 特征筛选参数 (0=不筛选)
     screen_k: int = Field(
-        default=0,
+        default=10000,
         ge=0,
         description="DC-SIS 筛选保留的 SNP 数目, 0=跳过",
     )
     gwas_k: int = Field(
-        default=0,
+        default=10000,
         ge=0,
         description="GWAS 筛选保留的 SNP 数目, 0=跳过",
     )
@@ -122,7 +129,7 @@ class TFPPConfig(BaseModel):
         description="mse=纯MSE, mse_pcc=MSE+PCC, mse_offset=MSE+个体偏移MSE",
     )
     offset_weight: float = 0.5
-    pcc_weight: float = 0.0
+    pcc_weight: float = 0.2
 
     # L1 稀疏正则化 (宽通路)
     l1_wide_weight: float = 1e-5  # L1 惩罚系数, 0=关闭

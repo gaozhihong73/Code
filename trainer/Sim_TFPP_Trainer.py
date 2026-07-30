@@ -574,9 +574,9 @@ class SimTFPPTrainer:
         torch.save(cpu_model_state, model_path)
         self.logger.info(f"【模型权重】已保存至: {model_path}")
 
-        # 保存模型结构配置 (供 load_tfpp_model 直接读取)
-        save_model_config(self.config, self.config.output_dir)
-        _cfg_path = Path(self.config.output_dir) / "model_config.json"
+        # 保存模型结构配置到 models/ 目录 (与 .pt 同级, 供 load_tfpp_model 读取)
+        save_model_config(self.config, self.best_model_save_dir)
+        _cfg_path = self.best_model_save_dir / "model_config.json"
         if _cfg_path.exists():
             with open(_cfg_path, mode="r", encoding="utf-8") as _f:
                 _mc = json.load(_f)

@@ -85,9 +85,9 @@ def _infer_params_from_state_dict(ckpt: dict) -> dict:
     return params
 
 
-def _load_config_json(model_dir: Path) -> dict | None:
-    """尝试加载训练时保存的 model_config.json。"""
-    config_path = model_dir / "model_config.json"
+def _load_config_json(ckpt_path: Path) -> dict | None:
+    """尝试加载与 .pt 同级的 model_config.json。"""
+    config_path = ckpt_path.parent / "model_config.json"
     if config_path.exists():
         with open(config_path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -157,7 +157,7 @@ def load_tfpp_model(
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
     # 优先从 config.json 读取，否则从 state_dict 推断
-    saved_config = _load_config_json(model_dir)
+    saved_config = _load_config_json(ckpt_path)
     inferred = _infer_params_from_state_dict(ckpt)
 
     # 合并参数: saved_config > inferred > 函数参数默认值

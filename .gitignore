@@ -1,42 +1,71 @@
-# Python-generated files
+# ==========================================
+# Python 运行与构建缓存 (Python & Cache)
+# ==========================================
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-.ruff_cache/
+*.py[cod]
 *$py.class
+*.so
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Virtual environments
+# ==========================================
+# 虚拟环境 (Virtual Environments)
+# ==========================================
+venv/
+env/
+ENV/
 .venv/
+.env
 
-# IDE
-.idea/
+# ==========================================
+# 开发工具与 IDE (Jupyter, VS Code, PyCharm)
+# ==========================================
+# Jupyter Notebook 缓存
+.ipynb_checkpoints
+*-checkpoint.ipynb
+# VS Code
 .vscode/
+*.code-workspace
+# PyCharm / JetBrains
+.idea/
 
-# 日志与缓存
-*.log
-**/logs
-
-# 备份
-backup/
-*.bak
+# ==========================================
+# 敏感信息与临时文件 (Environment & Credentials)
+# ==========================================
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+*.token
 
 # 其它
-/data/
-/docs/
+data/
+docs/
+.opencode/
 .workbuddy/
-.qoderignore
 .qoder/
-.opencode
-AGENTS.md
 figure/
 plotting/
+.qoderignore
+.opencode
+AGENTS.md
 dataset
 outputs
-.opencode/
 AGENTS.md
 **Baseline*
 **_Train.py

@@ -764,18 +764,15 @@ class TFPPTrainer:
         torch.save(cpu_model_state, model_path)
         self.logger.info(f"【模型权重】已保存至: {model_path}")
 
-        # 保存模型结构配置 (供 load_tfpp_model 直接读取)
-        save_model_config(self.config, self.config.output_dir)
-        # 补写筛选后的实际 snp_dim
-        import json as _json
-
-        _cfg_path = Path(self.config.output_dir) / "model_config.json"
+        # 保存模型结构配置到 models/ 目录 (与 .pt 同级, 供 load_tfpp_model 读取)
+        save_model_config(self.config, self.best_model_save_dir)
+        _cfg_path = self.best_model_save_dir / "model_config.json"
         if _cfg_path.exists():
             with open(_cfg_path, "r", encoding="utf-8") as _f:
-                _mc = _json.load(_f)
+                _mc = json.load(_f)
             _mc["snp_dim"] = self.snp_dim
             with open(_cfg_path, "w", encoding="utf-8") as _f:
-                _json.dump(_mc, _f, ensure_ascii=False, indent=2)
+                json.dump(_mc, _f, ensure_ascii=False, indent=2)
 
         # ==========================================
         # 2. 保存训练摘要与配置元数据 (.json)
@@ -1321,7 +1318,6 @@ class TFPPTrainer:
 
     def _log_configuration(self) -> None:
         """记录配置信息"""
-        self.logger.info("=" * 60)
         self.logger.info("训练配置:")
         self.logger.info(f"    实验名称: {self.exp_name}")
         self.logger.info(f"    样本数量: {self.num_sample}")
