@@ -26,6 +26,7 @@ from utils import (
     save_model_config,
     save_scalers,
 )
+from utils.Split import load_or_create_split
 
 
 class TFPPTrainer:
@@ -506,6 +507,19 @@ class TFPPTrainer:
 
         start_time = time.time()
 
+        indices = None
+        if self.config.split_file is not None:
+            indices = load_or_create_split(
+                self.config.split_file,
+                n_samples=self.num_sample,
+                ratios=(self.train_ratio, self.val_ratio, self.test_ratio),
+                seed=self.seed,
+            )
+            self.logger.info(
+                f"使用个体划分 {self.config.split_file}: seed={indices.metadata['seed']}, "
+                f"比例={indices.metadata['ratios']}, sample_id_source=row_index"
+            )
+
         # 创建数据加载器
         train_loader, val_loader, test_loader, scalers = get_dataloader(
             dataset=self.dataset,
@@ -517,6 +531,7 @@ class TFPPTrainer:
             val_ratio=self.val_ratio,
             seed=self.seed,
             device=self.device,
+            indices=indices,
         )
 
         # 保存表型的归一化器，用于在预测的时候进行反归一化

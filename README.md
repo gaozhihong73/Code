@@ -136,6 +136,42 @@ dataset/maize/
 
 ## 训练 (`train.py`)
 
+### 共享个体划分
+
+可用同一份 `.npz` 文件固定不同模型、不同表型实验的个体划分：
+
+```bash
+uv run python train.py --split_file splits/maize_seed73.npz --seed 73
+```
+
+文件不存在时，按当前比例和 seed 生成并保存；文件存在时，以文件中的索引为准，保留其划分 seed 和比例元数据，
+不会重新划分或覆盖。`--split_file auto` 根据样本数、seed、比例和个体顺序哈希在 `splits/` 下命名。
+单份划分不能与 `--use_kfold true` 同时使用；未指定 `split_file` 时保持原来的随机划分行为。
+
+当前真实数据加载器没有显式个体 ID，因此文件明确记录 `sample_id_source=row_index`，
+使用原始数据行号作为 sample_id。复用时须保持 SNP 与表型行顺序一致；仅凭行号无法识别
+同样行数的数据被重新排序或替换。若上游有真实 ID，可通过公共 API 提供并校验顺序：
+
+```python
+from utils.Split import generate_split, save_split, load_split
+
+split = generate_split(sample_ids=["maize-A", "maize-B", "maize-C"],
+                       ratios=(1 / 3, 1 / 3, 1 / 3), seed=73)
+save_split(split, "splits/example.npz")
+split = load_split("splits/example.npz", sample_ids=["maize-A", "maize-B", "maize-C"])
+```
+
+ConvAE 通过 `ConvAEConfig(split_file="splits/maize_seed73.npz")` 复用文件，
+只将其中 train/val 个体传给训练/验证 loader，test 个体保持留出。
+两个 loader 也支持 `indices=split`，K 折 loader 继续接收三组显式索引并校验覆盖和互斥。
+每行个体的全部时间点始终一起取出。本阶段仅统一划分，筛选和归一化原有调用顺序保持不变。
+
+快速 CPU 测试（使用合成数据与临时目录，不需要玉米数据或 GPU）：
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests -v
+```
+
 ### 快速开始
 
 ```bash

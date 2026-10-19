@@ -10,7 +10,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
+
+from utils.Split import IndividualSplit, validate_split_indices
 
 
 class ConvAEDataset(Dataset):
@@ -203,6 +205,7 @@ def get_mae_dataloader(
     val_ratio: float = 0.2,
     seed: int = 73,
     num_workers: int = 8,
+    indices: IndividualSplit | None = None,
 ) -> tuple[DataLoader, DataLoader]:
     """按指定比例划分训练/验证集并构建 DataLoader。
 
@@ -223,6 +226,8 @@ def get_mae_dataloader(
         随机数种子，默认 ``73``。
     num_workers : int, optional
         DataLoader 的数据加载线程数，默认 ``8``。
+    indices : IndividualSplit | None, optional
+        共享三集合划分；仅返回其中 train/val loader，test 个体保留。
 
     Returns
     -------
@@ -234,10 +239,18 @@ def get_mae_dataloader(
 
     generator = torch.Generator().manual_seed(seed)
 
-    # 划分纯净的互斥子集
-    train_subset, val_subset = random_split(
-        dataset, lengths=[train_ratio, val_ratio], generator=generator
-    )
+    if indices is None:
+        # 未指定共享划分时，保持原有两集合行为。
+        train_subset, val_subset = random_split(
+            dataset, lengths=[train_ratio, val_ratio], generator=generator
+        )
+    else:
+        validate_split_indices(
+            indices.train_idx, indices.val_idx, indices.test_idx, len(dataset)
+        )
+        train_subset = Subset(dataset, indices.train_idx.tolist())
+        val_subset = Subset(dataset, indices.val_idx.tolist())
+        # test_idx 保留给下游评估，不合并到 ConvAE 的训练集或验证集。
 
     loader_kwargs = {
         "batch_size": batch_size,

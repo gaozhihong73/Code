@@ -43,6 +43,12 @@ def parse_args():
 
     # ================= 数据集划分与预处理 =================
     parser.add_argument(
+        "--split_file",
+        type=str,
+        default=None,
+        help="个体划分 .npz 路径，存在则复用其 seed/比例，不存在则生成；auto 按 seed/比例/行索引哈希命名，仅普通训练",
+    )
+    parser.add_argument(
         "--train_ratio",
         type=float,
         default=0.8,
@@ -341,6 +347,7 @@ def main():
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
+        split_file=args.split_file,
         phenotype_names=args.pheno_names,
         time_coordinates=args.time_coordinates,
         norm_method=args.norm_method,

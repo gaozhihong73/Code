@@ -7,7 +7,7 @@
 from datetime import datetime
 
 import torch
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _default_exp_name() -> str:
@@ -109,6 +109,16 @@ class TFPPConfig(BaseModel):
     test_ratio: float = 0.1
     val_ratio: float = 0.1
     num_workers: int = 8
+    split_file: str | None = Field(
+        default=None,
+        description="个体划分 .npz 路径；已有文件优先，不存在则生成，auto 使用 splits/；仅普通训练",
+    )
+
+    @model_validator(mode="after")
+    def _validate_split_mode(self):
+        if self.use_kfold and self.split_file is not None:
+            raise ValueError("split_file 为单次 train/val/test 划分，不能与 use_kfold 同时使用")
+        return self
 
     # SNP 特征筛选参数 (0=不筛选)
     screen_k: int = Field(

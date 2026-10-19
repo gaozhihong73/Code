@@ -66,6 +66,7 @@ plotting/
 AGENTS.md
 dataset
 outputs
+splits/
 AGENTS.md
 **Baseline*
 **_Train.py

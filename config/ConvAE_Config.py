@@ -59,6 +59,10 @@ class ConvAEConfig(BaseModel):
     train_ratio: float = 0.8
     val_ratio: float = 0.2
     test_ratio: float = 0.0
+    split_file: str | None = Field(
+        default=None,
+        description="共享个体划分 .npz 路径；已有文件优先，不存在则生成，auto 使用 splits/；test 不参与训练/验证",
+    )
 
     @property
     def output_dir(self) -> str:

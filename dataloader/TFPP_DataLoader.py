@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY
+from utils.Split import IndividualSplit, validate_split_indices
 
 
 def to_tensor(x):
@@ -260,6 +261,7 @@ def get_dataloader(
     seed: int = 73,
     device: str = "cpu",
     num_workers: int = 8,
+    indices: IndividualSplit | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
     """根据比例划分数据集并构建训练/验证/测试 DataLoader。
 
@@ -295,6 +297,8 @@ def get_dataloader(
         训练设备标识，默认 ``'cpu'``。
     num_workers : int, optional
         DataLoader 的数据加载线程数，默认 ``8``。
+    indices : IndividualSplit | None, optional
+        显式个体划分；提供时使用其三组行索引，忽略 seed 和比例。
 
     Returns
     -------
@@ -307,6 +311,20 @@ def get_dataloader(
     scalers : dict
         包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
+    # 显式划分按原始个体行取数据，不再受本次 seed/比例影响。
+    if indices is not None:
+        return get_dataloader_with_kfold(
+            train_indices=indices.train_idx.tolist(),
+            val_indices=indices.val_idx.tolist(),
+            test_indices=indices.test_idx.tolist(),
+            dataset=dataset,
+            batch_size=batch_size,
+            device=device,
+            norm_method=norm_method,
+            scaler_type=scaler_type,
+            num_workers=num_workers,
+        )
+
     # 1. 划分数据集
     snp_data = dataset.snp  # [n_sample, n_feature]
     phenotype_data = dataset.phenotype  # [n_sample, n_pheno, n_time_points]
@@ -418,6 +436,7 @@ def get_dataloader_with_kfold(
         包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
     # 1. 提取各数据集的SNP和表型数据
+    validate_split_indices(train_indices, val_indices, test_indices, len(dataset))
     snp_data = dataset.snp
     phenotype_data = dataset.phenotype
 

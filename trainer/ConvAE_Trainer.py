@@ -15,6 +15,7 @@ from dataloader import ConvAEDataset, get_mae_dataloader
 from model.ConvAE import ConvAE
 from trainer._scheduler import WarmupSequentialLR
 from utils import Logger
+from utils.Split import load_or_create_split
 
 
 class ConvAETrainer:
@@ -288,6 +289,19 @@ class ConvAETrainer:
         self.logger.info("=" * 80)
         self._log_configuration()
 
+        indices = None
+        if self.config.split_file is not None:
+            indices = load_or_create_split(
+                self.config.split_file,
+                n_samples=self.num_sample,
+                ratios=(self.train_ratio, self.val_ratio, self.test_ratio),
+                seed=self.seed,
+            )
+            self.logger.info(
+                f"使用个体划分 {self.config.split_file}: seed={indices.metadata['seed']}, "
+                f"比例={indices.metadata['ratios']}, sample_id_source=row_index"
+            )
+
         # 根据 DataLoader 文件获取划分好的 loader
         train_loader, val_loader = get_mae_dataloader(
             self.dataset,
@@ -296,6 +310,7 @@ class ConvAETrainer:
             train_ratio=self.train_ratio,
             seed=self.seed,
             num_workers=self.num_workers,
+            indices=indices,
         )
 
         # 创建优化器和调度器
