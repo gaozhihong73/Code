@@ -189,6 +189,16 @@ def parse_args():
             "0=跳过此步骤"
         ),
     )
+    parser.add_argument(
+        "--screen_multivariate",
+        type=_str_to_bool,
+        default=False,
+        help=(
+            "DC-SIS 多元模式: true=将多表型 z-score 标准化后拼接为多维 Y,"
+            " SNP 与 Y=(Y1,Y2,...) 联合关联一次筛选;"
+            " false=逐表型筛选后取并集 (默认)"
+        ),
+    )
 
     # ================= 损失函数与正则化 =================
     parser.add_argument(
@@ -348,6 +358,7 @@ def main():
         num_workers=args.num_workers,
         screen_k=args.screen_k,
         gwas_k=args.gwas_k,
+        screen_multivariate=args.screen_multivariate,
         loss_type=args.loss_type,
         pcc_weight=args.pcc_weight,
         offset_weight=args.offset_weight,

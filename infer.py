@@ -25,6 +25,11 @@ from utils import (
 )
 
 
+def _str_to_bool(s: str) -> bool:
+    """将 'true'/'false' 字符串正确解析为布尔值，避免 argparse type=bool 的陷阱。"""
+    return s.strip().lower() == "true"
+
+
 def parse_args():
     """解析推理脚本的命令行参数。"""
     parser = argparse.ArgumentParser(
@@ -128,6 +133,15 @@ def parse_args():
         default=10000,
         help="GWAS 筛选保留的 SNP 数目 (需与训练时一致, 0=训练时未筛选)",
     )
+    parser.add_argument(
+        "--screen_multivariate",
+        type=_str_to_bool,
+        default=False,
+        help=(
+            "DC-SIS 多元模式: true=多表型拼接联合筛选, false=逐表型并集"
+            " (需与训练时一致, 默认 false)"
+        ),
+    )
 
     # ================= 推理运行时参数 =================
     parser.add_argument(
@@ -209,12 +223,14 @@ def predict():
                 screen_k=args.screen_k,
                 gwas_k=args.gwas_k,
                 seed=args.seed,
+                multivariate=args.screen_multivariate,
             )
             screened_idx = screen_snps(
                 dataset.snp,
                 dataset.phenotype,
                 screen_k=args.screen_k,
                 gwas_k=args.gwas_k,
+                multivariate=args.screen_multivariate,
                 cache_key=cache_key,
             )
             if screened_idx is not None:

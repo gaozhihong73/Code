@@ -121,6 +121,10 @@ class TFPPConfig(BaseModel):
         ge=0,
         description="GWAS 筛选保留的 SNP 数目, 0=跳过",
     )
+    screen_multivariate: bool = Field(
+        default=True,
+        description="DC-SIS 多元模式: True=多表型拼接联合筛选, False=逐表型筛选取并集",
+    )
 
     # 损失函数
     loss_type: str = Field(

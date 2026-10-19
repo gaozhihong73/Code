@@ -89,6 +89,7 @@ class TFPPTrainer:
         # SNP 特征筛选（在划分前对全量数据执行，筛选后再创建模型）
         self.screen_k = config.screen_k
         self.gwas_k = config.gwas_k
+        self.screen_multivariate = config.screen_multivariate
         if self.screen_k > 0 or self.gwas_k > 0:
             from utils import compute_cache_key, screen_snps
 
@@ -99,12 +100,14 @@ class TFPPTrainer:
                 screen_k=self.screen_k,
                 gwas_k=self.gwas_k,
                 seed=self.seed,
+                multivariate=self.screen_multivariate,
             )
             screened_idx = screen_snps(
                 self.dataset.snp,
                 self.dataset.phenotype,
                 screen_k=self.screen_k,
                 gwas_k=self.gwas_k,
+                multivariate=self.screen_multivariate,
                 cache_key=cache_key,
                 logger=self.logger,
             )
@@ -1375,6 +1378,7 @@ class TFPPTrainer:
         self.logger.info(f"    scaler_type: {self.scaler_type}")
         self.logger.info(f"    screen_k: {self.screen_k}")
         self.logger.info(f"    gwas_k: {self.gwas_k}")
+        self.logger.info(f"    screen_multivariate: {self.screen_multivariate}")
 
         self.logger.info("-" * 60)
         self.logger.info("模型配置:")
