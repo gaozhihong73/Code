@@ -16,6 +16,13 @@ import pandas as pd
 import torch
 
 from dataloader.TFPP_DataLoader import TFPPDataset, get_dataloader
+from config import TFPPConfig
+from utils.Genotype import (
+    dosage_to_model_codes,
+    model_codes_to_dosage,
+    model_code_tensor,
+    prepare_screening_dosage,
+)
 from utils import (
     compute_cache_key,
     denormalize_phenotype,
@@ -136,11 +143,17 @@ def parse_args():
     parser.add_argument(
         "--screen_multivariate",
         type=_str_to_bool,
-        default=False,
+        default=TFPPConfig.model_fields["screen_multivariate"].default,
         help=(
             "DC-SIS 多元模式: true=多表型拼接联合筛选, false=逐表型并集"
-            " (需与训练时一致, 默认 false)"
+            " (需与训练时一致)"
         ),
+    )
+    parser.add_argument(
+        "--screen_missing_strategy",
+        choices=["error", "mode"],
+        default=TFPPConfig.model_fields["screen_missing_strategy"].default,
+        help="筛选缺失策略，需与训练一致；本步骤不在推理中拟合填补器",
     )
 
     # ================= 推理运行时参数 =================
@@ -187,6 +200,10 @@ def predict():
         f"ablation_mode={model_info['ablation_mode']}"
     )
     print(f"[*] 表型列表: {phenotype_names}")
+    print(
+        f"[*] 筛选配置: screen_multivariate={args.screen_multivariate}, "
+        f"screen_missing_strategy={args.screen_missing_strategy}"
+    )
 
     # 2. 加载归一化器
     print(f"[*] 正在加载归一化器: {args.scaler_path}")
@@ -224,9 +241,13 @@ def predict():
                 gwas_k=args.gwas_k,
                 seed=args.seed,
                 multivariate=args.screen_multivariate,
+                missing_strategy=args.screen_missing_strategy,
             )
             screened_idx = screen_snps(
-                dataset.snp,
+                prepare_screening_dosage(
+                    model_codes_to_dosage(dataset.snp),
+                    missing_strategy=args.screen_missing_strategy,
+                ),
                 dataset.phenotype,
                 screen_k=args.screen_k,
                 gwas_k=args.gwas_k,
@@ -263,8 +284,8 @@ def predict():
     results = []
 
     if args.input_snp:
-        # 外部文件: 编码值 +1 对齐嵌入层索引 (原始 0/1/2 → 1/2/3, 0 留给 padding)
-        snp_tensor = torch.tensor(external_snp_data + 1, dtype=torch.float32).to(device)  # type: ignore
+        # 外部文件明确是原始剂量；缺失映射到模型类别0，禁止猜测类别码输入。
+        snp_tensor = model_code_tensor(dosage_to_model_codes(external_snp_data)).to(device)
         with torch.no_grad():
             preds_norm = model(snp_tensor)
 

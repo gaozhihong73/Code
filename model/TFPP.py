@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from utils.Genotype import model_code_tensor
+
 
 class LinearSelfAttention(nn.Module):
     """基于核函数的线性自注意力模块。
@@ -667,6 +669,7 @@ class TFPP(nn.Module):
         # ==============================================================================
         # 1. Wide Path: SNP -> Legendre 系数 -> 时间曲线
         # ==============================================================================
+        model_codes = model_code_tensor(x)
         x_norm = x / 2.0
         out_wide = self.wide_layer(x_norm)  # (B, num_phenotypes, num_time_points)
 
@@ -677,7 +680,7 @@ class TFPP(nn.Module):
         # 2. Deep Path: SNP -> Embedding -> 局部卷积 -> Linear Transformer -> 预测头
         # ==============================================================================
         # SNP 嵌入: (B, snp_dim) -> (B, snp_dim, d_model)
-        x_emb = self.snp_emb(x.long())
+        x_emb = self.snp_emb(model_codes)
 
         # 局部卷积: (B, snp_dim, d_model) -> (B, d_model, snp_dim) -> conv -> (B, snp_dim, d_model)
         x_local = x_emb.transpose(1, 2)

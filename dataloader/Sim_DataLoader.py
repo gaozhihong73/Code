@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 
 from utils import compute_cache_key, screen_snps
+from config.TFPP_Config import TFPPConfig
+from utils.Genotype import dosage_to_model_codes, prepare_screening_dosage, validate_dosage
 
 from .TFPP_DataLoader import _apply_normalization, _build_dataloaders_and_scalers
 
@@ -21,8 +23,8 @@ from .TFPP_DataLoader import _apply_normalization, _build_dataloaders_and_scaler
 def _load_snp_csv(csv_path: str) -> np.ndarray:
     """读取 Genotype csv, 丢弃首列样本ID"""
     df = pd.read_csv(csv_path)
-    snp = df.drop(columns=[df.columns[0]]).values.astype(np.float32)
-    return snp
+    snp = df.drop(columns=[df.columns[0]]).values
+    return validate_dosage(snp, allow_missing=True).astype(np.float32)
 
 
 def _load_pheno_csv(csv_path: str) -> np.ndarray:
@@ -78,6 +80,8 @@ class SimTFPPDataset:
         phenotype_names: list[str],
         screen_k: int = 0,
         gwas_k: int = 0,
+        screen_multivariate: bool = TFPPConfig.model_fields["screen_multivariate"].default,
+        screen_missing_strategy: str = TFPPConfig.model_fields["screen_missing_strategy"].default,
     ):
         """初始化模拟数据集，加载预划分的 SNP/表型 CSV 并执行双重特征筛选。
 
@@ -162,14 +166,25 @@ class SimTFPPDataset:
             gwas_k=gwas_k,
             seed=0,
             split_info="pre_split",
+            multivariate=screen_multivariate,
+            missing_strategy=screen_missing_strategy,
         )
-        screened_idx = screen_snps(
-            self.snp_train,
-            self.pheno_train,
-            screen_k=screen_k,
-            gwas_k=gwas_k,
-            cache_key=cache_key,
+        print(
+            f"筛选配置: screen_multivariate={screen_multivariate}, "
+            f"screen_missing_strategy={screen_missing_strategy}"
         )
+        screened_idx = None
+        if screen_k > 0 or gwas_k > 0:
+            screened_idx = screen_snps(
+                prepare_screening_dosage(
+                    self.snp_train, missing_strategy=screen_missing_strategy
+                ),
+                self.pheno_train,
+                screen_k=screen_k,
+                gwas_k=gwas_k,
+                multivariate=screen_multivariate,
+                cache_key=cache_key,
+            )
 
         if screened_idx is not None:
             self.snp_train = self.snp_train[:, screened_idx].copy()
@@ -228,9 +243,10 @@ def get_sim_dataloader(
         包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
     # 1. 直接使用 dataset 中已划分好的三组数组
-    train_snp, train_phenotype = dataset.snp_train, dataset.pheno_train
-    val_snp, val_phenotype = dataset.snp_val, dataset.pheno_val
-    test_snp, test_phenotype = dataset.snp_test, dataset.pheno_test
+    # 与真实管线共用编码边界：筛选保持剂量，送入模型前显式转为四类别码。
+    train_snp, train_phenotype = dosage_to_model_codes(dataset.snp_train), dataset.pheno_train
+    val_snp, val_phenotype = dosage_to_model_codes(dataset.snp_val), dataset.pheno_val
+    test_snp, test_phenotype = dosage_to_model_codes(dataset.snp_test), dataset.pheno_test
 
     # 2. 归一化 (仅用 train 拟合, 应用到 val/test)
     train_phe_norm, val_phe_norm, test_phe_norm, pheno_meta = _apply_normalization(

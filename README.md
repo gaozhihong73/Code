@@ -136,6 +136,39 @@ dataset/maize/
 
 ## 训练 (`train.py`)
 
+### 基因型编码与筛选缺失边界
+
+筛选与模型输入采用不同表示，转换集中在 `utils/Genotype.py`，调用方不得凭数值猜测表示：
+
+| 含义 | 原始/筛选剂量 | 模型类别码 |
+|------|---------------|------------|
+| 观测基因型 | `0 / 1 / 2` | `1 / 2 / 3` |
+| 原始缺失 | `-1` 或 `NaN`（不能直接进入筛选） | `0` |
+| ConvAE 边界填充 | 不参与筛选 | `0`，与现有缺失类别共用 |
+
+`dosage_to_model_codes()` 显式编码；`model_codes_to_dosage()` 将类别0恢复为缺失标记 `-1`。
+`validate_dosage()` 与 `prepare_screening_dosage()` 保证 GWAS/DC-SIS 只接收完整的离散剂量。
+三个筛选入口在计算或读取缓存前均校验输入，拒绝类别3、缺失、小数和无穷值。
+若数组恰好只含1/2，数值本身不能区分两种表示，因此必须遵循调用方的显式转换契约。
+模型通过 `model_code_tensor()` 校验后转换整数索引，禁止用截断连续表征来冒充类别码。
+
+仓库原先只记录了模型缺失类别，没有训练集拟合的筛选填补规则。新增
+`--screen_missing_strategy error|mode`：默认 `error` 明确拒绝缺失；`mode` 使用
+`TrainingDosageImputer.fit(dosage, train_idx=...)` 在指定训练个体上拟合逐位点众数，
+并列选择较小的观测剂量，训练中整列缺失则报错。`metadata_` 记录训练行号、缺失计数、
+填充值和编码版本，可随实验保存为 JSON。缺失可以经显式众数策略填为0，但不会自动当作观测剂量0。
+第1A步仅提供接口与合成测试，生产流程不执行 fit；遇缺失必须停止，待第2步在 train_idx 上接入。
+
+真实管线在筛选前显式解码模型类别；模拟管线使用相同剂量筛选，进入模型时统一转为四类别码，
+`SimTFPPConfig.num_embeddings` 默认改为4。旧三类别模拟 checkpoint 仍依赖旧编码，
+不能与新编码管线混用。TFPP/ConvAE 网络结构及筛选时机没有改变。
+
+`screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练、推理 CLI
+仍可显式传 `--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。
+旧实验若使用逐表型并集，推理时必须显式指定 `false`。
+缓存键新增编码版本 `dosage012_missing-1_categorical0123_v1`、筛选算法版本
+`gwas_pca_rint_minp_dcsis_v3` 和缺失策略，使旧文件不再命中；不删除旧缓存，训练索引哈希留待第2步加入。
+
 ### 共享个体划分
 
 可用同一份 `.npz` 文件固定不同模型、不同表型实验的个体划分：

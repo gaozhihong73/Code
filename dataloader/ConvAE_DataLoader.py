@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 
 from utils.Split import IndividualSplit, validate_split_indices
+from utils.Genotype import dosage_to_model_codes, model_code_tensor
 
 
 class ConvAEDataset(Dataset):
@@ -69,10 +70,8 @@ class ConvAEDataset(Dataset):
         if not Path(snp_file).exists():
             raise FileNotFoundError(f"SNP文件不存在: {snp_file}")
 
-        # 2. 从 .npy 文件直接加载，并处理缺失值 -1
-        # np.load(snp_file) + 1 会将 -1 映射为 0，0->1, 1->2, 2->3[cite: 1]
-        # 从而直接转化为标准的类别索引，供后续 Embedding 层使用
-        self.snp = np.load(snp_file).astype(np.int8) + 1
+        # 2. 集中转换：剂量0/1/2 → 模型类别1/2/3；-1/NaN → 缺失类别0。
+        self.snp = dosage_to_model_codes(np.load(snp_file))
 
         # 计算滑动步长
         self.chunks_size = chunk_size
@@ -106,9 +105,7 @@ class ConvAEDataset(Dataset):
             # 创建填充矩阵 (全 0 矩阵代表全为缺失值)
             padding = np.zeros((num_samples, pad_width), dtype=self.snp.dtype)
             self.snp = np.concatenate([self.snp, padding], axis=1, dtype=self.snp.dtype)
-        self.snp = torch.tensor(
-            self.snp, dtype=torch.long
-        )  # 转化成 Tensor ，方便使用 unfold 函数
+        self.snp = model_code_tensor(self.snp)  # 方便使用 unfold 函数
 
         print(
             f"数据加载完毕。SNP 原始长度: {current_length}，填充后形状: {self.snp.shape}，动态切分为 {self.num_chunks} 块"

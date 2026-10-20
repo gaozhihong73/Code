@@ -146,6 +146,8 @@ class SimTFPPTrainer:
             phenotype_names=self.phenotype_names,
             screen_k=self.config.screen_k,
             gwas_k=self.config.gwas_k,
+            screen_multivariate=self.config.screen_multivariate,
+            screen_missing_strategy=self.config.screen_missing_strategy,
         )
 
     def _create_optimizer_and_scheduler(self):
@@ -715,6 +717,8 @@ class SimTFPPTrainer:
         self.logger.info(f"    scaler_type: {self.scaler_type}")
         self.logger.info(f"    screen_k: {self.config.screen_k}")
         self.logger.info(f"    gwas_k: {self.config.gwas_k}")
+        self.logger.info(f"    screen_multivariate: {self.config.screen_multivariate}")
+        self.logger.info(f"    screen_missing_strategy: {self.config.screen_missing_strategy}")
 
         self.logger.info("-" * 60)
         self.logger.info("模型配置:")

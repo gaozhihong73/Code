@@ -22,6 +22,8 @@ from pathlib import Path
 import torch
 
 from model.TFPP import TFPP
+from .Genotype import GENOTYPE_ENCODING_VERSION
+from .Screening import SCREENING_ALGORITHM_VERSION
 
 
 def _infer_params_from_state_dict(ckpt: dict) -> dict:
@@ -274,6 +276,12 @@ def save_model_config(config, model_dir: str | Path) -> None:
         "time_coordinates": config.time_coordinates,
         "time_points": len(config.time_coordinates),
         "phenotype_names": config.phenotype_names,
+        "screen_k": config.screen_k,
+        "gwas_k": config.gwas_k,
+        "screen_multivariate": config.screen_multivariate,
+        "screen_missing_strategy": config.screen_missing_strategy,
+        "genotype_encoding_version": GENOTYPE_ENCODING_VERSION,
+        "screening_algorithm_version": SCREENING_ALGORITHM_VERSION,
     }
 
     config_path = model_dir / "model_config.json"

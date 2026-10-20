@@ -9,6 +9,8 @@
 import torch
 from torch import nn
 
+from utils.Genotype import model_code_tensor
+
 
 class SNPFeatureExtractor(nn.Module):
     """将离散 SNP 序列转换为稠密 Patch 向量并添加位置编码。
@@ -66,7 +68,7 @@ class SNPFeatureExtractor(nn.Module):
         B_chunks, L = x.shape
 
         # 1. SNP 类别嵌入: (B * num_chunks, chunk_size) -> (B * num_chunks, chunk_size, embed_dim)
-        x = self.snp_embedding(x)
+        x = self.snp_embedding(model_code_tensor(x))
 
         # 2. 划分为 Patches: (B * num_chunks, chunk_size, embed_dim) -> (B * num_chunks, num_patches, patch_size * embed_dim)
         x = x.view(B_chunks, self.num_patches, self.patch_size * x.shape[-1])

@@ -135,6 +135,11 @@ class TFPPConfig(BaseModel):
         default=True,
         description="DC-SIS 多元模式: True=多表型拼接联合筛选, False=逐表型筛选取并集",
     )
+    screen_missing_strategy: str = Field(
+        default="error",
+        pattern="^(error|mode)$",
+        description="筛选缺失策略：error=拒绝，mode=使用仅在 train_idx 上拟合的众数填补器；第1A步不自动fit",
+    )
 
     # 损失函数
     loss_type: str = Field(

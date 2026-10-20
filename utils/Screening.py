@@ -12,6 +12,11 @@ import numpy as np
 from scipy import stats
 from sklearn.decomposition import PCA
 
+from .Genotype import GENOTYPE_ENCODING_VERSION, validate_dosage
+
+
+SCREENING_ALGORITHM_VERSION = "gwas_pca_rint_minp_dcsis_v3"
+
 
 def _log(logger, msg: str) -> None:
     """统一日志输出: 有 logger 时走 logger.info, 否则 print。"""
@@ -35,6 +40,7 @@ def compute_cache_key(
     seed: int,
     split_info: str = "",
     multivariate: bool = False,
+    missing_strategy: str = "error",
 ) -> str:
     """根据数据文件路径+mtime 和筛选参数计算 MD5 缓存键。
 
@@ -59,6 +65,8 @@ def compute_cache_key(
         额外划分信息（如 kfold fold index），默认空字符串。
     multivariate : bool, optional
         是否使用多元 DC-SIS 模式（多表型拼接联合筛选），默认 ``False``。
+    missing_strategy : str, optional
+        显式缺失策略标识，参与缓存键；编码/算法版本也参与缓存键。
 
     Returns
     -------
@@ -66,6 +74,10 @@ def compute_cache_key(
         32 位十六进制 MD5 哈希字符串。
     """
     hasher = hashlib.md5()
+    # 编码/算法升级强制使旧缓存失效；训练索引哈希在第2步接入。
+    hasher.update(
+        f"{GENOTYPE_ENCODING_VERSION}|{SCREENING_ALGORITHM_VERSION}|{missing_strategy}".encode()
+    )
 
     # 文件路径 + 修改时间
     for fpath in [snp_file, pheno_source]:
@@ -188,6 +200,7 @@ def dc_sis_screen(
     dcor : np.ndarray
         每个 SNP 的距离相关系数，形状为 ``(n_snp,)``，dtype ``float32``。
     """
+    snp_train = validate_dosage(snp_train)
     N, P = snp_train.shape
     y_2d = pheno_train.reshape(N, -1)  # [N, T]
 
@@ -348,6 +361,7 @@ def gwas_screen(
     min_p : np.ndarray
         每个 SNP 的最小 P 值，形状为 ``(n_snp,)``，dtype ``float64``。
     """
+    snp_train = validate_dosage(snp_train)
     N, P = snp_train.shape
 
     # ---- 1. 构造动态性状特征矩阵 [N, F] ----
@@ -453,7 +467,7 @@ def screen_snps(
     Parameters
     ----------
     snp_train : np.ndarray
-        训练集基因型矩阵，形状为 ``(n_sample, n_snp)``。
+        完整的离散剂量0/1/2，形状为 ``(n_sample, n_snp)``；拒绝缺失与模型类别码。
     pheno_train : np.ndarray
         训练集表型数据，形状为 ``(n_sample, n_pheno, n_time)``。
     screen_k : int, optional
@@ -477,6 +491,8 @@ def screen_snps(
     np.ndarray | None
         排序后的 SNP 列索引数组；若 screen_k 和 gwas_k 均为 0 则返回 ``None``。
     """
+    # 即使缓存命中或筛选关闭，也不能让非法类别码/缺失绕过剂量契约。
+    snp_train = validate_dosage(snp_train)
     if screen_k <= 0 and gwas_k <= 0:
         return None
 
@@ -492,6 +508,8 @@ def screen_snps(
     if verbose:
         _log(logger, "=" * 60)
         _log(logger, "SNP 特征筛选")
+        _log(logger, f"  编码版本: {GENOTYPE_ENCODING_VERSION}")
+        _log(logger, f"  筛选算法版本: {SCREENING_ALGORITHM_VERSION}")
         _log(logger, f"  原始特征数: {P}")
         _log(logger, f"  表型数量:   {n_pheno}")
         _log(logger, f"  screen_k:   {screen_k}")

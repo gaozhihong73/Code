@@ -15,6 +15,8 @@ from datetime import datetime
 import torch
 from pydantic import BaseModel, Field
 
+from .TFPP_Config import TFPPConfig
+
 
 class SimTFPPConfig(BaseModel):
     """模拟数据 TFPP 表型预测模型的训练配置，支持预划分的基因型/表型 CSV 输入。
@@ -82,7 +84,7 @@ class SimTFPPConfig(BaseModel):
     phenotype_names: list[str] = Field(
         default_factory=lambda: ["sim_pheno"], min_length=1
     )
-    num_embeddings: int = 3
+    num_embeddings: int = 4  # 模型类别0=缺失，1/2/3=剂量0/1/2
 
     # ============ 损失函数 ============
     loss_type: str = Field(
@@ -101,6 +103,11 @@ class SimTFPPConfig(BaseModel):
     screen_k: int = 100  # DC-SIS 筛选 SNP 数 (默认 100, 与 gwas_k 各 100)
     # GWAS 筛选: OLS+PCA 协变量校正 + Mean/AUC/Slope 三性状 min-P, 0=关闭
     gwas_k: int = 100  # GWAS 筛选 SNP 数 (默认 100, 与 screen_k 并集)
+    screen_multivariate: bool = TFPPConfig.model_fields["screen_multivariate"].default
+    screen_missing_strategy: str = Field(
+        default=TFPPConfig.model_fields["screen_missing_strategy"].default,
+        pattern="^(error|mode)$",
+    )
 
     # ============ DataLoader / 其他 ============
     num_workers: int = 8

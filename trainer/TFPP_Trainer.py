@@ -27,6 +27,7 @@ from utils import (
     save_scalers,
 )
 from utils.Split import load_or_create_split
+from utils.Genotype import model_codes_to_dosage, prepare_screening_dosage
 
 
 class TFPPTrainer:
@@ -91,6 +92,11 @@ class TFPPTrainer:
         self.screen_k = config.screen_k
         self.gwas_k = config.gwas_k
         self.screen_multivariate = config.screen_multivariate
+        self.screen_missing_strategy = config.screen_missing_strategy
+        self.logger.info(
+            f"筛选配置: screen_multivariate={self.screen_multivariate}, "
+            f"screen_missing_strategy={self.screen_missing_strategy}"
+        )
         if self.screen_k > 0 or self.gwas_k > 0:
             from utils import compute_cache_key, screen_snps
 
@@ -102,9 +108,13 @@ class TFPPTrainer:
                 gwas_k=self.gwas_k,
                 seed=self.seed,
                 multivariate=self.screen_multivariate,
+                missing_strategy=self.screen_missing_strategy,
             )
             screened_idx = screen_snps(
-                self.dataset.snp,
+                prepare_screening_dosage(
+                    model_codes_to_dosage(self.dataset.snp),
+                    missing_strategy=self.screen_missing_strategy,
+                ),
                 self.dataset.phenotype,
                 screen_k=self.screen_k,
                 gwas_k=self.gwas_k,
@@ -1268,6 +1278,7 @@ class TFPPTrainer:
         self.logger.info(f"各表型K折统计已保存: {phenotype_stats_path}\n")
 
         # 保存每折的详细结果和模型
+        save_model_config(self.config, self.best_model_save_dir)
         fold_details = []
         for i, result in enumerate(fold_results):
             denorm_overall = result["test_results"]["denormalized"]["overall"]
@@ -1394,6 +1405,7 @@ class TFPPTrainer:
         self.logger.info(f"    screen_k: {self.screen_k}")
         self.logger.info(f"    gwas_k: {self.gwas_k}")
         self.logger.info(f"    screen_multivariate: {self.screen_multivariate}")
+        self.logger.info(f"    screen_missing_strategy: {self.screen_missing_strategy}")
 
         self.logger.info("-" * 60)
         self.logger.info("模型配置:")

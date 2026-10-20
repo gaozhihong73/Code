@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY
+from utils.Genotype import dosage_to_model_codes
 from utils.Split import IndividualSplit, validate_split_indices
 
 
@@ -209,8 +210,8 @@ class TFPPDataset:
         if not Path(snp_file).exists():
             raise FileNotFoundError(f"SNP文件不存在: {snp_file}")
 
-        # 加载SNP数据
-        self.snp = np.load(snp_file) + 1  # [n_sample, n_feature]
+        # self.snp 明确为模型类别码；筛选调用方必须显式解码为剂量。
+        self.snp = dosage_to_model_codes(np.load(snp_file))
 
         self.pheno_dir = pheno_dir
         self.phenotype_names = phenotype_names
