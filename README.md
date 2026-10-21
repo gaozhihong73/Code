@@ -643,3 +643,92 @@ CPU 合成冒烟测试自动在临时目录生成40个体、13 SNP、真实缺�
 .venv/bin/python -B -m unittest discover -s tests -v
 git diff --check
 ```
+
+## ConvAE 独立 Ridge 下游基线（第8步）
+
+`ridge_convae.py` 仅用于评价“ConvAE 表征的独立线性探针/下游基线”，
+不等同于 TFPP 的同构模型比较，也不能据此声称 ConvAE 优于监督式 SNP 筛选。
+本步骤不增加 MLP、不改变 TFPP 或 ConvAE，不自动执行正式实验。
+
+模型固定为多输出 `Ridge(fit_intercept=True, solver="lsqr", tol=1e-6, max_iter=10000)`；
+目标按 phenotype-major、time-minor 顺序从 `[N,P,T]` 展平为 `[N,P*T]`。
+alpha 固定为 `[1e-4,1e-3,1e-2,1e-1,1,10,100,1000,10000]`，不提供覆盖选项。
+每个候选只在 train 上 fit；按归一化尺度整体 val MSE 选择，数值并列
+（`rtol=1e-12, atol=1e-12`）取较大 alpha。保留选中的 train-only 模型，不合并 val 重拟合。
+连续特征逐列 Z-score、表型按各表型全时间点 global Z-score，均只 fit train。
+表型 scaler 独立拟合并保存，不复用 ConvAE scaler；缺失表型明确报错。
+
+标签采用显式 ID 的 NPZ，不猜测或自动重排；字段为：
+
+```text
+phenotype_names, time_labels                 # 必须与 export metadata 同序
+train_phenotype, train_sample_ids             # 原始量纲 [N_train,P,T]、[N_train]
+val_phenotype, val_sample_ids
+test_phenotype, test_sample_ids              # 同样为 manifest 原序
+```
+
+可用 `utils.ConvAE_Ridge.save_probe_targets()` 建立此文件。以下仅展示已有数据如何打包，
+CSV 必须已确认与原始 SNP/sample_id 行序一致；行索引不代表生物学身份验证：
+
+```python
+import numpy as np
+import pandas as pd
+from utils.ConvAE_Export import load_exported_features
+from utils.ConvAE_Ridge import save_probe_targets
+from utils.Split import load_split
+
+arrays, meta = load_exported_features(export_dir)
+split = load_split(meta["split_file"])
+raw = np.stack([pd.read_csv(f"{pheno_dir}/{name}.csv").to_numpy()
+                for name in meta["phenotype_names"]], axis=1)
+targets = {role: (raw[getattr(split, role + "_idx")], arrays[role][1])
+           for role in ("train", "val", "test")}
+save_probe_targets("ridge_targets.npz", targets,
+                   phenotype_names=meta["phenotype_names"], time_labels=meta["time_labels"])
+```
+
+运行示例（不自动执行）：
+
+```bash
+.venv/bin/python -B ridge_convae.py \
+  --export_dir <第7步导出目录> --phenotype_file ridge_targets.npz \
+  --output_root outputs/baselines/convae_ridge --seed 73
+```
+
+先校验所有特征/ID 文件哈希，再与独立 split/fold manifest 逐行比较。
+`--split_file` 可提供迁移后的 manifest 路径，内容哈希必须保持一致。
+train/val 标签分别读取；九个候选搜索结束后才读取 test 标签并评估一次，
+状态保存为 `test_evaluation_count=1`，重复评估入口明确失败。
+重新加载模型仅做无标签预测复现，不增加测试指标评估次数。
+
+产物目录为 `<output_root>/<export_metadata_sha256>/<baseline_config_sha256>/`，
+已存在则报错，禁止覆盖。配置哈希包含固定模型/归一化/并列规则、seed 和标签文件指纹；
+对标签做回归测试时可使用另一输出根目录。目录保存：
+
+```text
+config.json, alpha_search.json, feature_scaler.pkl, phenotype_scaler.pkl,
+ridge_model.pkl, metrics.json, test_predictions.npz, test_predictions.csv,
+summary.json, environment.json, run.log, artifacts.json
+```
+
+`metrics.json` 同时记录 normalized/denormalized 下的整体、逐表型、逐时间点、
+逐表型逐时间点五项指标。沿用 TFPP 的 `compute_metrics_vectorized()`：
+先时间列均值再按表型等权平均；R² 为时间校正全局 R²，保留负值，不截断。
+仅 PCC 的未定义值处理按本步骤要求调整：常数/近常数列保留 `NaN`，
+汇总只对有限 PCC 取均值并记录有效/总列数及有效聚合数；全无效时仍为 `NaN`。
+JSON 使用 Python 可读取的 `NaN`，不会把它替换成0。TFPP 本身的行为没有改变。
+预测 CSV 以 manifest 的 test sample_id 为第一排序层，其后为 phenotype/time 原序，
+含 sample_id、split/fold 指纹、表型、时间点、原始量纲真实值和预测值。
+
+summary/environment 记录 commit/dirty、seed、split/fold、checkpoint/export 哈希、
+特征维度、训练/选择时间、预测时间和包含导入及先前工作的 Linux 进程峰值 RSS。
+所有产物带文件哈希；`load_ridge_probe()` 加载本项目产生的可信本地 pickle，
+`predict_probe()` 只变换和预测。运行结束会加载保存模型，校验 test 预测复现。
+
+CPU 合成冒烟测试生成第7步的最小 checkpoint/export，运行上述 CLI，临时产物自动清理：
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests -p test_convae_ridge.py -v
+.venv/bin/python -B -m unittest discover -s tests -v
+git diff --check
+```
