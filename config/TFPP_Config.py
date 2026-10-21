@@ -127,6 +127,8 @@ class TFPPConfig(BaseModel):
             raise ValueError("fold_index 仅用于已确定划分的内部折实验")
         return self
 
+    preselected_snp_file: str | None = Field(default=None, description="runner 已保存的原始有序 SNP 列索引；不重做筛选")
+
     # SNP 特征筛选参数 (0=不筛选)
     screen_k: int = Field(
         default=10000,

@@ -212,7 +212,11 @@ class TFPPTrainer:
         )
         screening_imputer = None
         selected = None
-        if self.screen_k > 0 or self.gwas_k > 0:
+        if self.config.preselected_snp_file is not None:
+            if self.screen_k or self.gwas_k:
+                raise ValueError("preselected_snp_file 不能与内部监督筛选同时启用")
+            selected = np.load(self.config.preselected_snp_file, allow_pickle=False)
+        elif self.screen_k > 0 or self.gwas_k > 0:
             if self.screen_missing_strategy == "mode":
                 screening_imputer = TrainingDosageImputer("mode").fit(
                     train_dosage, train_idx=np.arange(len(train_idx), dtype=np.int64)
@@ -311,6 +315,7 @@ class TFPPTrainer:
             "screen_multivariate": self.screen_multivariate,
             "screen_missing_strategy": self.screen_missing_strategy,
             "screening_cache_key": self.screening_cache_key,
+            "preselected_snp_file": self.config.preselected_snp_file,
             "training_genotype_sha256": array_fingerprint(train_codes),
             "training_phenotype_sha256": array_fingerprint(train_phenotype),
             "screening_dosage_encoding_version": GENOTYPE_ENCODING_VERSION,

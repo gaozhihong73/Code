@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -129,8 +130,10 @@ def load_role_targets(path: str | Path, role: str, ids: np.ndarray, meta: dict) 
 
 
 def fit_probe(train_x: np.ndarray, train_y: np.ndarray, val_x: np.ndarray, val_y: np.ndarray,
-              phenotype_names: list[str], *, seed: int = 73) -> tuple[dict, list[dict]]:
+              phenotype_names: list[str], *, seed: int = 73, timings: dict | None = None) -> tuple[dict, list[dict]]:
     """此 API 不接收 test。九个候选均只 fit train，保留选中对象，不合并 val 重拟合。"""
+    preprocessing_start = time.perf_counter()
+    fit_seconds, validation_seconds = 0.0, 0.0
     train_x, val_x = np.asarray(train_x, dtype=np.float64), np.asarray(val_x, dtype=np.float64)
     feature_scaler = StandardScaler().fit(train_x)
     scalers = {"norm_method": "global", "phenotype_names": phenotype_names,
@@ -140,13 +143,18 @@ def fit_probe(train_x: np.ndarray, train_y: np.ndarray, val_x: np.ndarray, val_y
     val = feature_scaler.transform(val_x)
     y = transform_phenotypes(train_y, scalers).numpy().reshape(len(train_y), -1).astype(np.float64)
     val_target = transform_phenotypes(val_y, scalers).numpy().reshape(len(val_y), -1).astype(np.float64)
+    fit_seconds += time.perf_counter() - preprocessing_start
     candidates, records = [], []
     for alpha in ALPHAS:
         model = Ridge(alpha=alpha, fit_intercept=True, solver="lsqr", tol=1e-6,
                       max_iter=10000, random_state=seed)
+        fit_start = time.perf_counter()
         model.fit(train, y)
+        fit_seconds += time.perf_counter() - fit_start
+        validation_start = time.perf_counter()
         prediction = model.predict(val)
         score = float(np.mean((prediction - val_target) ** 2))
+        validation_seconds += time.perf_counter() - validation_start
         if not math.isfinite(score):
             raise ValueError("val MSE 非有限，禁止选择模型")
         records.append({"alpha": alpha, "normalized_val_mse": score, "fit_rows": len(train_y)})
@@ -157,6 +165,8 @@ def fit_probe(train_x: np.ndarray, train_y: np.ndarray, val_x: np.ndarray, val_y
     best = max(tied, key=lambda i: records[i]["alpha"])
     for i, record in enumerate(records):
         record["selected"] = i == best
+    if timings is not None:
+        timings.update(training=fit_seconds, validation=validation_seconds)
     return {"model": candidates[best], "feature_scaler": feature_scaler, "phenotype_scaler": scalers,
             "target_shape": train_y.shape[1:], "alpha": records[best]["alpha"],
             "test_evaluation_count": 0}, records
@@ -250,7 +260,8 @@ def load_ridge_probe(directory: str | Path) -> dict:
 
 def run_ridge_baseline(export_dir: str | Path, phenotype_file: str | Path, *,
                        output_root: str | Path = "outputs/baselines/convae_ridge",
-                       split_file: str | Path | None = None, seed: int = 73) -> Path:
+                       split_file: str | Path | None = None, seed: int = 73,
+                       before_test: Callable[[], None] | None = None) -> Path:
     """独立线性探针；test 标签只在九个 alpha 的 train/val 选择完全结束后读取。"""
     started = time.perf_counter()
     export_dir, phenotype_file = Path(export_dir).resolve(), Path(phenotype_file).resolve()
@@ -270,11 +281,14 @@ def run_ridge_baseline(export_dir: str | Path, phenotype_file: str | Path, *,
         val_y = load_role_targets(phenotype_file, "val", arrays["val"][1], meta)
         with threadpool_limits(limits=1):
             fit_start = time.perf_counter()
+            timings = {}
             package, search = fit_probe(arrays["train"][0].astype(np.float64), train_y,
-                arrays["val"][0].astype(np.float64), val_y, meta["phenotype_names"], seed=seed)
+                arrays["val"][0].astype(np.float64), val_y, meta["phenotype_names"], seed=seed, timings=timings)
             training_seconds = time.perf_counter() - fit_start
             record(f"fit/selection finished: alpha={package['alpha']}; train-only, no refit")
             # 唯一一次读取 test 标签，严格位于模型选择之后。
+            if before_test is not None:
+                before_test()
             test_y = load_role_targets(phenotype_file, "test", arrays["test"][1], meta)
             infer_start = time.perf_counter()
             norm_pred, raw_pred, metrics = evaluate_test_once(package, arrays["test"][0], test_y, meta)
@@ -310,6 +324,7 @@ def run_ridge_baseline(export_dir: str | Path, phenotype_file: str | Path, *,
             "feature_shapes": {role: list(arrays[role][0].shape) for role in ROLES},
             "fit_scope": {"features": "train", "phenotype": "train", "Ridge": "train", "alpha": "val"},
             "test_evaluation_count": package["test_evaluation_count"], "training_seconds": training_seconds,
+            "fit_seconds": timings["training"], "validation_seconds": timings["validation"],
             "test_prediction_and_metrics_seconds": test_evaluation_seconds,
             "inference_seconds": package["test_inference_seconds"], "prediction_replay_check": True,
             "peak_memory_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,

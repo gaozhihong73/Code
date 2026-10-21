@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY
 from utils.Genotype import dosage_to_model_codes
-from utils.Split import IndividualSplit, validate_split_indices
+from utils.Split import IndividualSplit, validate_individual_split, validate_split_indices
 
 
 def to_tensor(x):
@@ -318,7 +318,9 @@ def get_dataloader(
     """
     # 显式划分按原始个体行取数据，不再受本次 seed/比例影响。
     if indices is not None:
+        validate_individual_split(indices, n_samples=len(dataset))
         return get_dataloader_with_kfold(
+            excluded_indices=indices.metadata.get("excluded_train_idx", []),
             train_indices=indices.train_idx.tolist(),
             val_indices=indices.val_idx.tolist(),
             test_indices=indices.test_idx.tolist(),
@@ -393,6 +395,7 @@ def get_dataloader_with_kfold(
     norm_method: str,
     scaler_type: str,
     num_workers: int = 4,
+    excluded_indices: list[int] | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
     """基于 KFold 预划分的索引构建训练/验证/测试 DataLoader。
 
@@ -439,7 +442,8 @@ def get_dataloader_with_kfold(
         包含 scaler 元信息的字典，用于推理阶段逆归一化。
     """
     # 1. 提取各数据集的SNP和表型数据
-    validate_split_indices(train_indices, val_indices, test_indices, len(dataset))
+    validate_split_indices(train_indices, val_indices, test_indices, len(dataset),
+                           excluded_idx=[] if excluded_indices is None else excluded_indices)
     snp_data = dataset.snp
     phenotype_data = dataset.phenotype
 

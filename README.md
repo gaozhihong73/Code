@@ -732,3 +732,135 @@ CPU 合成冒烟测试生成第7步的最小 checkpoint/export，运行上述 CL
 .venv/bin/python -B -m unittest discover -s tests -v
 git diff --check
 ```
+
+## 配置驱动实验与结果追溯（第10步，spec/result schema 1）
+
+`run_experiments.py` 负责计划、校验、状态、运行和严格汇总；不实现第9步的连续 TFPP。
+`experiments/example.spec.json` 是需要填写真实文件指纹和时间列的示例，零哈希不是有效数据。
+`experiments/spec.py` 定义严格 Pydantic spec，`results.py` 定义状态/结果 schema。
+每条 `experiments` 记录是明确的一个实验协议；只按给定外层 folds 展开，不自动做全轴组合。
+
+核心 spec 结构如下（路径相对于 spec 文件；所有 SHA256 必须填入真实值）：
+
+```json
+{
+  "schema_version": 1,
+  "data": {
+    "snp": {"path": "snp.npy", "sha256": "<文件SHA256>"},
+    "phenotypes": {"RGBVI": {"path": "RGBVI.csv", "sha256": "<文件SHA256>"}},
+    "n_samples": 400, "n_snps": 50000,
+    "sample_id_source": "row_index", "sample_ids_sha256": "<manifest中的ID顺序哈希>",
+    "time_labels": ["10", "12"], "time_coordinates": [10, 12]
+  },
+  "splits": {"mode": "regular", "manifests": [{"path": "split.npz", "sha256": "<文件SHA256>"}]},
+  "experiments": [{
+    "route": "GWAS->DC-SIS", "traits": ["RGBVI"], "seed": 73,
+    "train_size": {"fraction": 0.5}, "gwas_k": 10000, "k": 1000,
+    "screening_mode": "joint", "ablation": "full",
+    "tfpp": {"epochs": 200, "screen_missing_strategy": "mode", "device": "cpu"}
+  }],
+  "output_root": "outputs/experiments"
+}
+```
+
+时间列必须覆盖实际 CSV 的完整列和顺序；示例仅展示两个时间点，不隐式截取原始 CSV。
+`file_digest(path)` 提供分块内容 SHA256。大数据的声明指纹在实际运行前核实。
+普通模式只能有一个普通 manifest；K折须提供完整 fold 1..K，且每个样本恰好 test 一次。
+所有路线读取同一个外层 split/fold 集合，seed 只控制训练、随机位点和嵌套子集，不重新分外层集合。
+当前数据没有生物学 ID，明确使用行索引及顺序哈希，不能据此鉴别未记录的生物学行重排。
+
+已支持路线（名称区分大小写）：
+
+| route | 输入与筛选 |
+| --- | --- |
+| `fixed_indices` | 必须给 `fixed_indices: {path, sha256}`，校验非空/整数/范围/唯一性，保留文件原列序 |
+| `random_k` | 只由训练基因型列数、k、seed 生成并保存有序索引，不接触表型 |
+| `GWAS` | 训练行拟合 GWAS；k 使用 `gwas_k` |
+| `DC-SIS` | 训练行拟合 DC-SIS；k 使用 `k` |
+| `GWAS->DC-SIS` | 显式在 GWAS 候选列内做 DC-SIS，包含小 SNP 矩阵，不使用旧并行并集启发式 |
+| `ConvAE->Ridge` | 按 manifest 顺序提供 `exports: [{path: ".../metadata.json", sha256: "..."}]`，复用第7/8步 |
+
+监督筛选可选 `screening_mode=joint` 或 `per_trait_union`，method id 分开。
+保存各阶段原始列索引、逐性状入选及独占数量、去重前后数量、最终有序索引哈希；
+联合关联没有独立性状归因，不伪造贡献数。实际维度从保存的 `screened_indices.npy` 读取。
+筛选缺失策略由 `tfpp.screen_missing_strategy` 控制，所有 fit 只用本子集训练行。
+runner 禁用内部筛选缓存，TFPPTrainer 通过 `preselected_snp_file` 复用外部已保存索引。
+
+TFPP 消融明确映射 `full→all`、`wide_only→wide`、`deep_only→deep`、
+`no_gate_add→add`；最后一项是已有的直接相加路径，本步骤有真实训练/反向测试。
+未知消融明确拒绝，不回退 full；任何 `continuous_feature` 路线当前明确失败。
+ConvAE->Ridge 不接受 TFPP 消融或配置，模型仍为第8步固定 Ridge。
+
+`train_size` 恰好提供 `count` 或 `fraction`（向下取整，至少2个训练个体）。
+只在原 train 中按 `SHA256(seed,sample_id)` 稳定排序取前缀，随后恢复原 manifest 行序；
+较小集合严格包含于较大集合，val/test 完全不变。保存原 train、排除行、子集规则及哈希。
+`IndividualSplit` 新增可选 excluded_train_idx/parent_train_idx 约定：
+train+val+test+明确排除的原训练行必须互斥并完整覆盖个体；普通旧 manifest 行为不变。
+每个子集重新拟合筛选、填补、表型 scaler 和新模型。
+ConvAE export 必须由同一子集/fold 的编码器产生，不能把全 train 编码器用于较小训练集对比。
+
+命令：
+
+```bash
+# 只读计划：校验小型 split/JSON/固定索引及依赖，不载入 SNP/表型/潜在特征大数组，不写结果
+.venv/bin/python -B run_experiments.py dry-run experiments/example.spec.json
+
+# 显式正式运行；须先完善 spec，并提交代码使工作区 clean
+.venv/bin/python -B run_experiments.py run <真实spec.json>
+
+# 仅相同配置、代码版本/dirty tree、数据指纹和 split 的安全恢复
+.venv/bin/python -B run_experiments.py run <真实spec.json> --resume
+
+# 本步骤允许的实际执行：40个体、13 SNP、单轮CPU，六条路线全部走通
+.venv/bin/python -B run_experiments.py smoke --directory /tmp/dynags_experiment_smoke
+
+# smoke 生成的可用 spec 也可执行 dry-run；目录已存在不会写伪结果
+.venv/bin/python -B run_experiments.py dry-run /tmp/dynags_experiment_smoke/spec.json --development-smoke
+.venv/bin/python -B run_experiments.py summarize <run_hash目录> <另一个run_hash目录>
+```
+
+正式运行默认拒绝 dirty 工作区；`--development-smoke` 仅用于开发，显式记录到配置和汇总轴。
+运行 hash 覆盖 resolved 数据/模型/损失/早停/指标口径、所有轴、split、commit/dirty tree 指纹。
+每次执行重验数据内容及实际 shape。默认禁止覆盖相同 hash。
+resume 的成功实验只校验并返回，不重训/重测；test 前失败允许新 attempt 从头重启，保留旧错误日志。
+不支持中途优化器状态续训。test 预约持久化后，无论成功与否均禁止失败重试中重测。
+数据、split、代码或配置变化必须作为新实验；`--resume` 不会自动寻找相似旧目录。
+
+产物示例：
+
+```text
+outputs/experiments/<canonical_config_sha256>/
+├── resolved_config.json
+├── status.json                  # running / failed / success，attempt、test_evaluation_count
+├── manifest.json                # ResultManifest schema 1，实验轴、样本身份、维度、参数量、耗时、资源峰值
+├── artifacts.json               # 配置、manifest、split、模型、scaler、history、特征/索引、预测、指标哈希
+└── attempt_001/
+    ├── split.npz                # 原始行索引，子集保留 excluded train 元数据
+    ├── selection.json           # TFPP：各阶段/性状贡献、训练指纹及筛选填补
+    ├── screened_indices.npy
+    ├── backend_config.json
+    ├── backend/                 # 复用原 TFPPTrainer 的 schema 3 预处理、checkpoint、scaler、训练历史与日志
+    ├── predictions.npz          # manifest 顺序的 sample_ids、预测、标签
+    ├── predictions.csv          # sample_id、fold、split、trait、time、真实值、预测
+    ├── metrics.json             # 归一化/原尺度，各四层指标；保留负R²及未定义PCC
+    └── environment.json
+```
+
+Ridge attempt 另存 `ridge/` 的完整第8步产物、export metadata 副本和特征数组哈希引用。
+参数量及实际 D 来自已运行模型/已保存产物；耗时区分筛选、训练、验证和推理。
+ConvAE->Ridge 的训练/验证时间指 Ridge，不冒充重新训练编码器的时间。
+CPU RSS 是注明范围的 Linux 进程高水位；GPU 记录峰值 allocated 显存；CPU smoke 为0。
+失败保留 resolved config、status、attempt/error.log，不以空值或旧结果冒充成功。
+
+汇总只接受版本/schema、success、配置/commit、所有产物哈希及预测身份校验通过的运行。
+保留 mode、split family、seed、train size、trait set、route/method id、ablation、fold 和完整协议 hash。
+不同 k、模型/优化配置、数据、代码或开发/正式状态不会混合；重复 fold 不重复计权。
+fold 未齐全时标记 incomplete，不计算均值/std；齐全后输出每折明细及各层指标均值/std（ddof=0）、有效数。
+普通 split 与K折始终分组。CLI run 在 `summaries/<计划hash>.json` 保存汇总，不覆盖变化内容。
+smoke 将真实合成结果保存在指定目录和 `smoke_summary.json`，不会进入正式数据目录。
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests -p test_experiments.py -v
+.venv/bin/python -B -m unittest discover -s tests -v
+git diff --check
+```

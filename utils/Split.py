@@ -64,7 +64,7 @@ def _ratios(ratios):
     return values.tolist()
 
 
-def validate_split_indices(train_idx, val_idx, test_idx, n_samples: int) -> None:
+def validate_split_indices(train_idx, val_idx, test_idx, n_samples: int, *, excluded_idx=()) -> None:
     """拒绝非整数、重复、越界、交叉或未完整覆盖个体的索引。"""
     if isinstance(n_samples, bool) or not isinstance(n_samples, Integral) or n_samples < 1:
         raise ValueError("n_samples 必须为正整数")
@@ -76,7 +76,12 @@ def validate_split_indices(train_idx, val_idx, test_idx, n_samples: int) -> None
         if (array < 0).any() or (array >= n_samples).any():
             raise ValueError(f"{name} 索引越界")
         arrays.append(array.astype(np.int64))
-    combined = np.concatenate(arrays)
+    excluded = np.asarray(excluded_idx)
+    if excluded.ndim != 1 or (excluded.size and excluded.dtype.kind not in "iu"):
+        raise ValueError("excluded_idx 必须为一维整数数组")
+    if (excluded < 0).any() or (excluded >= n_samples).any():
+        raise ValueError("excluded_idx 越界")
+    combined = np.concatenate([*arrays, excluded.astype(np.int64)])
     if np.unique(combined).size != combined.size:
         raise ValueError("集合内索引重复或集合之间存在交集")
     if combined.size != n_samples:
@@ -161,8 +166,16 @@ def _validate_split(split: IndividualSplit) -> None:
         raise ValueError("行索引 sample_id 的顺序不合法")
     _ratios(meta["ratios"])
     validate_split_indices(
-        split.train_idx, split.val_idx, split.test_idx, meta["n_samples"]
+        split.train_idx, split.val_idx, split.test_idx, meta["n_samples"],
+        excluded_idx=meta.get("excluded_train_idx", ()),
     )
+
+    if "excluded_train_idx" in meta:
+        parent = np.asarray(meta.get("parent_train_idx", []))
+        expected = np.concatenate([split.train_idx, np.asarray(meta["excluded_train_idx"], dtype=np.int64)])
+        if (parent.dtype.kind not in "iu" or parent.ndim != 1
+                or not np.array_equal(np.sort(parent), np.sort(expected))):
+            raise ValueError("训练子集必须明确记录 parent_train_idx=train+excluded")
 
 
 def save_split(split: IndividualSplit, path: str | Path) -> Path:

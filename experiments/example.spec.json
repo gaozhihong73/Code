@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "data": {
+    "snp": {
+      "path": "../dataset/maize/snp/snp_50000.npy",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "phenotypes": {
+      "RGBVI": {
+        "path": "../dataset/maize/cleaned_pheno/RGBVI.csv",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "n_samples": 400,
+    "n_snps": 50000,
+    "sample_id_source": "row_index",
+    "sample_ids_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "time_labels": [
+      "10",
+      "12"
+    ],
+    "time_coordinates": [
+      10,
+      12
+    ]
+  },
+  "splits": {
+    "mode": "regular",
+    "manifests": [
+      {
+        "path": "../splits/shared_seed73.npz",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
+  },
+  "experiments": [
+    {
+      "route": "random_k",
+      "seed": 73,
+      "traits": [
+        "RGBVI"
+      ],
+      "train_size": {
+        "fraction": 1
+      },
+      "k": 1000,
+      "ablation": "full",
+      "tfpp": {
+        "device": "cpu",
+        "epochs": 200,
+        "num_workers": 0
+      }
+    },
+    {
+      "route": "GWAS->DC-SIS",
+      "seed": 73,
+      "traits": [
+        "RGBVI"
+      ],
+      "train_size": {
+        "fraction": 0.5
+      },
+      "gwas_k": 10000,
+      "k": 1000,
+      "screening_mode": "joint",
+      "ablation": "deep_only",
+      "tfpp": {
+        "device": "cpu",
+        "screen_missing_strategy": "mode"
+      }
+    }
+  ],
+  "output_root": "../outputs/experiments"
+}
