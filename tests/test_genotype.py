@@ -399,76 +399,22 @@ class GenotypeTests(unittest.TestCase):
                 tuple(mae(codes[:, None], mask_ratio=0)[0].shape), (2, 1, 4)
             )
 
-    def test_inference_test_mode_explicitly_decodes_before_screening(self):
+    def test_inference_module_has_no_screening_or_fitting_loader(self):
         import infer
 
-        snp_path, _ = self.write_inputs()
-        argv = [
-            "infer.py",
-            "--model_path",
-            "unused",
-            "--snp_file",
-            snp_path,
-            "--pheno_dir",
-            str(self.root),
-            "--screen_k",
-            "4",
-            "--gwas_k",
-            "4",
-        ]
-        info = dict(
-            phenotype_names=["toy"],
-            d_model=8,
-            num_layers=1,
-            degree=1,
-            ablation_mode="all",
-            snp_dim=4,
-        )
-        with (
-            patch.object(sys, "argv", argv),
-            patch.object(Path, "mkdir"),
-            patch.object(infer, "load_tfpp_model", return_value=(Mock(), info)),
-            patch.object(infer, "load_scalers", return_value={"norm_method": "global"}),
-            patch.object(infer, "compute_cache_key", return_value=None),
-            patch.object(
-                infer, "screen_snps", side_effect=RuntimeError("stop-before-output")
-            ) as screening,
-            redirect_stdout(io.StringIO()),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "stop-before-output"):
-                infer.predict()
-        np.testing.assert_array_equal(screening.call_args.args[0], self.dosage)
+        self.assertFalse(hasattr(infer, "screen_snps"))
+        self.assertFalse(hasattr(infer, "get_dataloader"))
 
-    def test_external_inference_encodes_dosage_and_preserves_missing(self):
+    def test_external_inference_requires_explicit_input_stage(self):
         import infer
 
-        snp_path, _ = self.write_inputs()
-        raw = self.dosage.copy()
-        raw[0, 0] = -1
-        np.save(snp_path, raw)
-        info = dict(
-            phenotype_names=["toy"],
-            d_model=8,
-            num_layers=1,
-            degree=1,
-            ablation_mode="all",
-            snp_dim=12,
-        )
-        model = Mock(side_effect=RuntimeError("stop-before-output"))
-        argv = ["infer.py", "--model_path", "unused", "--input_snp", snp_path]
-        with (
-            patch.object(sys, "argv", argv),
-            patch.object(Path, "mkdir"),
-            patch.object(infer, "load_tfpp_model", return_value=(model, info)),
-            patch.object(infer, "load_scalers", return_value={"norm_method": "global"}),
-            patch.object(infer.torch.cuda, "is_available", return_value=False),
-            redirect_stdout(io.StringIO()),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "stop-before-output"):
-                infer.predict()
-        tensor = model.call_args.args[0]
-        self.assertEqual(tensor.dtype, torch.long)
-        np.testing.assert_array_equal(tensor.numpy(), dosage_to_model_codes(raw))
+        with redirect_stdout(io.StringIO()), patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                infer.parse_args(["--model_path", "unused", "--input_snp", "raw.npy"])
+        for stage in ("raw", "screened"):
+            args = infer.parse_args(["--model_path", "unused", "--input_snp", "x.npy",
+                                     "--input_stage", stage])
+            self.assertEqual(args.input_stage, stage)
 
 
 if __name__ == "__main__":

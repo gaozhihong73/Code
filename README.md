@@ -29,7 +29,7 @@ DynaGS 提出了一种融合 Legendre 多项式宽通路 (Wide) 与 Transformer 
 - **两阶段 SNP 特征筛选**: GWAS (F 检验) 粗筛 + DC-SIS (距离相关确定独立性筛选) 精筛，将 50000+ 维 SNP 压缩至 informative 子集，大幅降低计算开销。
 - **多表型联合预测**: 单次训练同时预测多个表型 (如 RGBVI、GreenCoverage 等) 在全部时间点上的动态曲线。
 - **灵活的消融实验**: 通过 `--ablation_mode` 一键切换完整模型 / 仅 Wide / 仅 Deep / 无门控相加，便于对比分析。
-- **自动模型加载**: 推理时自动从 checkpoint 推测模型结构参数，无需手动指定网络配置。
+- **训练产物复用**: 推理严格加载保存的模型配置、划分、筛选索引和 scaler，不重新筛选或拟合。
 
 ## 项目目录结构
 
@@ -163,9 +163,9 @@ dataset/maize/
 `SimTFPPConfig.num_embeddings` 默认改为4。旧三类别模拟 checkpoint 仍依赖旧编码，
 不能与新编码管线混用。普通 TFPP 在划分后筛选；K折与模拟训练暂保持旧流程。
 
-`screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练、推理 CLI
-仍可显式传 `--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。
-旧实验若使用逐表型并集，推理时必须显式指定 `false`。
+`screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练可显式传
+`--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。
+推理仅使用训练记录，保留的同名 CLI 参数不重新计算或覆盖筛选。
 缓存键新增编码版本 `dosage012_missing-1_categorical0123_v1`、筛选算法版本
 `gwas_pca_rint_minp_dcsis_v3` 和缺失策略。普通训练还加入稳定训练索引哈希、训练 SNP/表型内容指纹、
 表型列表、筛选参数及 split 标识；不读取全数据文件 mtime，所以修改验证/测试行不改变缓存键。
@@ -189,9 +189,9 @@ Deep 只接收类别 `0/1/2/3`，保留缺失类别0。Wide 独立恢复剂量�
 - `preprocessing/preprocessing.json`：维度、筛选配置、训练行/数据指纹、缓存键、编码版本及填补元数据。
 - `scalers/scaler.pkl`：只由训练表型拟合的 scaler。
 
-`load_tfpp_model()` 恢复新模型的 Wide 填补参数；旧权重显式保留旧输入语义。
-`infer.py` 的测试集自动重建尚未迁移，因此对新模型拒绝全量重新筛选；外部模式应先按保存的
-列索引与顺序准备 SNP。K折的全量监督筛选泄漏尚未在本步修复。
+`load_tfpp_model()` 和 `load_model_from_checkpoint()` 默认严格校验训练产物，并恢复 Wide
+填补 buffer。测试集推理复用保存的 test_idx 和原始列索引，不再通过 seed 重建或读取表型筛选。
+K折的全量监督筛选泄漏尚未修复；其旧产物仅允许显式 legacy 兼容。
 
 ### 共享个体划分
 
@@ -358,63 +358,57 @@ outputs/tfpp/{exp_name}/
 
 ## 推理 (`infer.py`)
 
-### 快速开始
+推理默认要求实验目录中有 `models/best_model.pt`、`models/model_config.json`、
+`preprocessing/{preprocessing.json,split.npz,screened_indices.npy}` 和 `scalers/scaler.pkl`。
+缺少产物时直接报错，不重新筛选、不重新拟合 scaler 或缺失填充值。
 
 ```bash
-# 最简用法: 只需指定实验目录, 自动定位模型和归一化器
-python infer.py --model_path outputs/tfpp/maize_rgbvi
+# 保存的 test_idx + 保存的原始列索引；不需要读取表型
+.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
+  --snp_file dataset/maize/snp/snp_50000.npy --device cpu
 
-# 对外部 SNP 数据进行预测
-python infer.py \
-  --model_path outputs/tfpp/maize_rgbvi \
-  --input_snp dataset/maize/snp/snp_50000.npy \
-  --output outputs/infer/prediction.csv
+# 可选读取测试标签：仅使用训练 scaler.transform，CSV 增加 True 列
+.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
+  --snp_file dataset/maize/snp/snp_50000.npy --pheno_dir dataset/maize/cleaned_pheno
 
-# 复现测试集预测 (需与训练时参数一致)
-python infer.py \
-  --model_path outputs/tfpp/maize_rgbvi \
-  --seed 73 \
-  --screen_k 10000 \
-  --gwas_k 10000
+# 原始全维剂量输入：校验原始维度，然后按训练索引切片
+.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
+  --input_snp external_raw.npy --input_stage raw --output outputs/infer/raw.csv
+
+# 已筛选剂量输入：列序必须与 screened_indices.npy 一致，不再切片
+.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
+  --input_snp external_screened.npy --input_stage screened
 ```
 
-### 两种预测模式
+两种外部输入均为二维 dosage `0/1/2`，缺失只能标为 `-1` 或 `NaN`，不是模型类别码。
+必须显式指定 `--input_stage`，即使原始维度恰好等于筛选后维度。Deep 保留缺失类别0；
+Wide 使用 checkpoint 内的训练填充值恢复剂量后除以2，推理期间禁止重新拟合。
+`wide_missing_strategy=error` 的实验持久化空填补 buffer，拒绝任何筛选后缺失输入。
 
-| 模式 | 触发条件 | 说明 |
-|------|----------|------|
-| 外部文件模式 | 传入 `--input_snp` | 对指定的 SNP 数据直接预测 |
-| 测试集模式 | 不传 `--input_snp` | 自动复现训练时的数据划分，在测试集上预测并输出真实值对比 |
+测试集原始数据必须保持训练时的个体行序；当前 sample_id 是行索引，不是生物学个体 ID。
+可选表型 CSV 同样必须保持行序和训练时间点顺序。输出 `sample_idx` 是保存的原始个体索引。
+`--batch_size`（默认32）控制批量大小，`--device cpu` 可强制 CPU。
+不再接受推理期 seed、划分比例、screen_k/gwas_k 或 scaler_type 来重建预处理。
 
-### 全部参数说明
+新训练保存 schema 3 预处理记录，包含 split、筛选索引、scaler、Wide 填充值的哈希及时间坐标；
+完整的第2步 schema 2 产物仍可读取，Wide 填充值必须与 checkpoint buffer 一致。
+每次推理输出 CSV 和同名 `.metadata.json`，记录 checkpoint/产物哈希及时间坐标。
 
-#### 核心路径
+旧 checkpoint 默认拒绝；仅诊断性复现可显式使用：
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--model_path` | **[必填]** 实验目录或 .pt 文件路径 | - |
-| `--scaler_path` | 归一化器路径 (不指定则自动推导: `{exp_dir}/scalers/scaler.pkl`) | 自动推导 |
-| `--input_snp` | 外部 SNP 数据路径 (.npy) | None (使用测试集) |
-| `--output` | 预测结果 CSV 保存路径 | `outputs/infer/inference_{timestamp}.csv` |
+```bash
+.venv/bin/python -B infer.py --model_path outputs/tfpp/old_experiment --legacy \
+  --input_snp old_screened_dosage.npy --input_stage screened
+```
 
-#### 测试集复现参数 (需与训练时一致)
+legacy 会打印醒目警告，只接受外部 screened 数据，不猜测旧测试划分或重做监督筛选。
+保留旧 categorical Wide 语义，CSV 与 JSON 均标记 `legacy=true, paper_eligible=false`，
+不得进入论文正式实验汇总；旧三类别模拟 checkpoint 不可与新的四类别输入编码混用。
+新格式产物损坏或缺失时，`--legacy` 不能绕过校验。`--scaler_path` 仅可用于 legacy。
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--snp_file` | 训练时的 SNP 文件路径 | `dataset/maize/snp/snp_50000.npy` |
-| `--pheno_dir` | 训练时的表型目录 | `dataset/maize/cleaned_pheno` |
-| `--train_ratio` | 训练集比例 | 0.8 |
-| `--val_ratio` | 验证集比例 | 0.1 |
-| `--test_ratio` | 测试集比例 | 0.1 |
-| `--seed` | 随机种子 | 73 |
-| `--scaler_type` | 缩放器类型 | `zscore` |
-| `--screen_k` | DC-SIS 筛选数 | 10000 |
-| `--gwas_k` | GWAS 筛选数 | 10000 |
+CPU 合成测试（无需真实数据或 GPU）：
 
-#### 运行时参数
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--batch_size` | 推理批次大小 | 32 |
-| `--num_workers` | DataLoader 工作线程数 | 8 |
-
-> **Note:** 模型结构参数 (d_model, num_layers, degree 等) 无需手动指定，`infer.py` 通过 `utils/model_loader.py` 自动从 checkpoint 同级的 `model_config.json` 读取或从权重张量形状推测。
+```bash
+.venv/bin/python -B -m unittest discover -s tests -v
+git diff --check
+```

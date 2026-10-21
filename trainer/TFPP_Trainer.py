@@ -305,7 +305,7 @@ class TFPPTrainer:
         split_sha256 = hashlib.sha256(copied_split.read_bytes()).hexdigest()
         np.save(artifacts / "screened_indices.npy", self.screened_indices)
         self.preprocessing_metadata = {
-            "schema_version": 2,
+            "schema_version": 3,
             "training_mode": "regular",
             "split_source": str(Path(split_path).resolve()),
             "split_copy": "split.npz",
@@ -318,6 +318,15 @@ class TFPPTrainer:
             "original_snp_dim": self.original_snp_dim,
             "snp_dim": self.snp_dim,
             "phenotype_names": self.phenotype_names,
+            "time_coordinates": self.config.time_coordinates,
+            "screened_indices_sha256": hashlib.sha256(
+                (artifacts / "screened_indices.npy").read_bytes()
+            ).hexdigest(),
+            "scaler_sha256": hashlib.sha256(Path(self.scaler_file).read_bytes()).hexdigest(),
+            "wide_fill_values_sha256": array_fingerprint(np.asarray(
+                [] if self.wide_fill_values is None else self.wide_fill_values,
+                dtype=np.float32,
+            )),
             "screen_k": self.screen_k,
             "gwas_k": self.gwas_k,
             "screen_multivariate": self.screen_multivariate,

@@ -1,11 +1,7 @@
 """TFPP 模型通用加载器。
 
-从 checkpoint (.pt) 自动反推模型结构参数并重建 TFPP 实例，
-支持真实数据与模拟数据训练产出的所有模型。
-
-优先级:
-1. 若模型目录下存在 ``model_config.json``，直接读取（训练时自动保存）。
-2. 否则从 state_dict 的张量形状反推参数（兼容旧 checkpoint）。
+默认严格校验模型配置与完整的普通训练预处理产物。
+旧 checkpoint 只有显式 ``legacy=True`` 才允许反推参数，并警告禁止用于正式汇总。
 
 用法::
 
@@ -17,6 +13,7 @@
 """
 
 import json
+import warnings
 from pathlib import Path
 
 import torch
@@ -106,6 +103,7 @@ def load_tfpp_model(
     phenotype_names: list[str] | None = None,
     ablation_mode: str | None = None,
     verbose: bool = True,
+    legacy: bool = False,
 ) -> tuple[TFPP, dict]:
     """通用 TFPP 模型加载器：自动推测参数、重建模型、加载权重。
 
@@ -127,6 +125,8 @@ def load_tfpp_model(
         消融模式覆盖。若未提供，从 state_dict 自动推断。
     verbose : bool, optional
         是否打印反推的参数信息，默认 True。
+    legacy : bool, optional
+        显式允许不完整的旧实验；新格式损坏时仍失败，不绕过校验。
 
     Returns
     -------
@@ -161,6 +161,34 @@ def load_tfpp_model(
     # 优先从 config.json 读取，否则从 state_dict 推断
     saved_config = _load_config_json(ckpt_path)
     inferred = _infer_params_from_state_dict(ckpt)
+    from .Inference import load_inference_artifacts
+
+    is_new = ("wide_fill_values" in ckpt
+              or (model_dir / "preprocessing" / "preprocessing.json").exists()
+              or (saved_config or {}).get("wide_input_mode") == "dosage_v1")
+    artifacts = None
+    if is_new:
+        if saved_config is None:
+            raise FileNotFoundError("新格式实验缺少 models/model_config.json，禁止从权重猜测配置")
+        artifacts = load_inference_artifacts(model_dir, saved_config)
+        for key in ("snp_dim", "d_model", "num_layers", "d_ff", "num_embeddings", "degree", "time_points"):
+            if saved_config.get(key) != inferred.get(key):
+                raise ValueError(f"checkpoint 与 model_config 不一致: {key}")
+        if (set(saved_config["phenotype_names"]) != set(inferred.get("phenotype_names", []))
+                or len(saved_config["phenotype_names"]) != inferred.get("num_phenotypes")):
+            raise ValueError("checkpoint 的表型名称或数量与模型配置不一致")
+        fill = ckpt.get("wide_fill_values")
+        if fill is None or not torch.equal(fill.cpu(), torch.as_tensor(artifacts.wide_fill_values)):
+            raise ValueError("checkpoint 缺少 Wide 填充值或与训练预处理记录不一致")
+        for key, override in (("num_heads", num_heads), ("time_coordinates", time_coordinates),
+                              ("phenotype_names", phenotype_names), ("ablation_mode", ablation_mode)):
+            if override is not None and override != saved_config.get(key):
+                raise ValueError(f"严格推理禁止覆盖训练配置: {key}")
+    elif not legacy:
+        raise ValueError("旧 checkpoint 缺少完整训练产物；仅可显式使用 legacy=True / --legacy 进入兼容模式")
+    else:
+        warnings.warn("!!! LEGACY：旧 checkpoint 无法保证预处理可复现；结果禁止进入论文正式实验汇总 !!!",
+                      RuntimeWarning, stacklevel=2)
 
     # 合并参数: saved_config > inferred > 函数参数默认值
     snp_dim = (saved_config or {}).get("snp_dim") or inferred.get("snp_dim")
@@ -238,6 +266,9 @@ def load_tfpp_model(
         "wide_input_mode": wide_input_mode,
         "ckpt_path": str(ckpt_path),
         "config_source": "model_config.json" if saved_config else "state_dict_inference",
+        "artifacts": artifacts,
+        "legacy": not is_new,
+        "paper_eligible": is_new,
     }
 
     if verbose:

@@ -292,7 +292,8 @@ class RegularTFPPTests(unittest.TestCase):
         ).eval()
         path = self.root / "legacy.pt"
         torch.save(model.state_dict(), path)
-        restored, info = load_tfpp_model(path, num_heads=2, verbose=False)
+        with self.assertWarnsRegex(RuntimeWarning, "LEGACY"):
+            restored, info = load_tfpp_model(path, num_heads=2, verbose=False, legacy=True)
         self.assertEqual(info["wide_input_mode"], "legacy_categorical")
         with torch.inference_mode():
             x = torch.tensor([[0.0, 2.0, 3.0], [1.0, 1.0, 1.0]])
@@ -334,20 +335,14 @@ class RegularTFPPTests(unittest.TestCase):
         self.assertEqual(trainer.model.wide_input_mode, "legacy_categorical")
 
     def test_new_model_cannot_silently_use_legacy_inference_rescreening(self):
-        import sys
-
         import infer
 
-        info = {"wide_input_mode": "dosage_v1"}
-        with (
-            patch.object(sys, "argv", ["infer.py", "--model_path", "unused"]),
-            patch.object(Path, "mkdir"),
-            patch.object(infer, "load_tfpp_model", return_value=(None, info)),
-            patch.object(infer, "screen_snps") as selector,
-            redirect_stdout(io.StringIO()),
-        ):
-            with self.assertRaisesRegex(ValueError, "禁止重新使用全体表型筛选"):
-                infer.predict()
+        trainer = self.trainer()
+        torch.save(trainer.model.state_dict(), trainer.best_model_save_dir / "best_model.pt")
+        (Path(trainer.config.preprocessing_save_dir) / "split.npz").unlink()
+        with patch("utils.Screening.screen_snps") as selector:
+            with self.assertRaisesRegex(FileNotFoundError, "split.npz"):
+                infer.predict(["--model_path", trainer.config.output_dir, "--legacy"])
         selector.assert_not_called()
 
 

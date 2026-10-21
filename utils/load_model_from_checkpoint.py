@@ -7,11 +7,11 @@ import numpy as np
 import pandas as pd
 import torch
 
-from model.TFPP import TFPP
 
-
-def load_model_from_checkpoint(model_dir: str | Path, device: str = "cpu"):
-    """从 checkpoint 反推所有超参并重建 TFPP 模型。
+def load_model_from_checkpoint(
+    model_dir: str | Path, device: str = "cpu", *, legacy: bool = False
+):
+    """统一委托严格模型加载器；旧实验必须显式 legacy=True。
 
     Parameters
     ----------
@@ -19,6 +19,8 @@ def load_model_from_checkpoint(model_dir: str | Path, device: str = "cpu"):
         模型输出目录, 应包含 ``models/best_model.pt``。
     device : str, optional
         加载模型的设备, 默认 ``"cpu"``。
+    legacy : bool, optional
+        仅诊断性兼容旧实验，结果禁止进入论文正式汇总。
 
     Returns
     -------
@@ -28,60 +30,9 @@ def load_model_from_checkpoint(model_dir: str | Path, device: str = "cpu"):
         包含 ``snp_dim``, ``time_points``, ``degree``, ``d_model``,
         ``num_layers``, ``d_ff``, ``phenotype_names`` 等信息。
     """
-    model_dir = Path(model_dir)
-    ckpt_path = model_dir / "models" / "best_model.pt"
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    from .model_loader import load_tfpp_model
 
-    t_basis = ckpt["wide_layer.t_basis"]
-    degree = int(t_basis.shape[0] - 1)
-    time_points = int(t_basis.shape[1])
-    snp_dim = int(ckpt["wide_layer.snp_importance"].shape[1])
-    d_model = int(ckpt["snp_emb.weight"].shape[1])
-    d_ff = int(ckpt["encoder.layers.0.ffn.0.weight"].shape[0])
-    num_layers = sum(
-        1
-        for k in ckpt
-        if k.startswith("encoder.layers.") and k.endswith(".norm1.weight")
-    )
-    num_embeddings = 3
-    num_heads = 4  # wide-only 模式下 deep 通路不执行, 值不影响推理
-    phenotype_names = ["sim_pheno"]
-
-    print("从 checkpoint 反推的模型参数:")
-    print(
-        f"  d_model={d_model}  num_heads={num_heads}  num_layers={num_layers}  d_ff={d_ff}"
-    )
-    print(f"  snp_dim={snp_dim}  degree={degree}  time_points={time_points}")
-
-    model = TFPP(
-        snp_dim=snp_dim,
-        d_model=d_model,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        d_ff=d_ff,
-        num_embeddings=num_embeddings,
-        time_coordinates=list(range(1, time_points + 1)),
-        dropout=0.25,
-        phenotype_names=phenotype_names,
-        degree=degree,
-        ablation_mode="wide",
-        wide_input_mode="dosage_v1" if "wide_fill_values" in ckpt else "legacy_categorical",
-        wide_fill_values=ckpt.get("wide_fill_values"),
-    ).to(device)
-
-    model.load_state_dict(ckpt)
-    model.eval()
-
-    info = {
-        "snp_dim": snp_dim,
-        "time_points": time_points,
-        "degree": degree,
-        "d_model": d_model,
-        "num_layers": num_layers,
-        "d_ff": d_ff,
-        "phenotype_names": phenotype_names,
-    }
-    return model, info
+    return load_tfpp_model(model_dir, device=device, legacy=legacy)
 
 
 def load_scaler_and_mean_curve(model_dir: str | Path):
@@ -152,7 +103,9 @@ def load_test_csvs(scenario: str, p: int, n: int, h: float, rep: int):
     return geno.values.astype(np.int64), pheno.values.astype(np.float32)
 
 
-def run_inference(model, X: np.ndarray, device: str):
+def run_inference(
+    model, X: np.ndarray, device: str, *, artifacts=None, input_stage=None
+):
     """运行模型推理并返回预测值。
 
     Parameters
@@ -169,8 +122,18 @@ def run_inference(model, X: np.ndarray, device: str):
     pred_norm : np.ndarray
         模型原始输出, shape ``(n_samples, n_pheno, n_time)``。
     """
-    with torch.no_grad():
+    if model.wide_input_mode == "dosage_v1":
+        from .Inference import prepare_inference_input
+
+        if artifacts is None:
+            raise ValueError(
+                "新格式推理必须传入加载器返回的 artifacts 和显式 input_stage"
+            )
+        X_t = prepare_inference_input(X, artifacts, input_stage=input_stage).to(device)
+    else:
+        # 显式 legacy 加载的旧画图流程保持原有类别输入约定。
         X_t = torch.tensor(X, dtype=torch.float32, device=device)
+    with torch.no_grad():
         pred_norm = model(X_t).cpu().numpy()  # [N, 1, T]
     return pred_norm
 
