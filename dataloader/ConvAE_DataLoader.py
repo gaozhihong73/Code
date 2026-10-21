@@ -1,261 +1,173 @@
-"""ConvAE 卷积自编码器的数据加载与预处理模块。
+"""ConvAE（带表型辅助任务的 MAE）原始数据与训练个体专用归一化。"""
 
-本模块负责 ConvAE 训练所需的数据管线：从 .npy 加载 SNP 基因型（+1 偏移处理缺失值）、
-滑动窗口分块（chunk_size + overlap）、动态零填充对齐、表型全局 Z-score 归一化，
-最终构建 PyTorch DataLoader。
-"""
-
+from dataclasses import dataclass
+from numbers import Integral
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, Dataset, Subset
 
-from utils.Split import IndividualSplit, validate_split_indices
 from utils.Genotype import dosage_to_model_codes, model_code_tensor
+from utils.Inference import transform_phenotypes
+from utils.Split import IndividualSplit, generate_split, validate_individual_split
 
 
 class ConvAEDataset(Dataset):
-    """ConvAE 模型专用数据集，集成滑动窗口分块、归一化与动态填充处理。
+    """只加载原始表型、类别 SNP 和个体顺序，建立分块及独立 padding mask。
 
-    从 ``.npy`` 文件加载 SNP 数据（+1 偏移将缺失值 -1 映射为 0），
-    通过滑动窗口将长序列切分为多个等长子块（``chunk_size`` 窗口，
-    ``overlap`` 重叠），不足部分自动零填充。同时从 CSV 文件加载表型数据
-    并执行全局 Z-score 归一化。
-
-    Parameters
-    ----------
-    snp_file : str
-        SNP 数据文件路径（``.npy`` 格式），加载后形状为 ``(n_sample, n_feature)``。
-    pheno_dir : str
-        表型 CSV 文件存放目录，每个表型对应一个 ``{name}.csv`` 文件。
-    phenotype_names : list[str]
-        需要加载的表型名称列表。
-    chunk_size : int, optional
-        每个滑动窗口的 SNP 位点数（窗口大小），默认 ``12000``。
-    overlap : int, optional
-        相邻窗口之间的重叠位点数，默认 ``2000``。
+    原始 dosage -1/NaN 映射为缺失类别0，剂量0/1/2映射为类别1/2/3。
+    结构性 padding 虽也编码0，但 padding_mask=True；真实缺失位置始终有效。
+    __getitem__ 保持 (chunks, raw_phenotype) 两项接口，不执行统计拟合。
     """
 
-    def __init__(
-        self,
-        snp_file: str,
-        pheno_dir: str,
-        phenotype_names: list[str],
-        chunk_size: int = 12000,
-        overlap: int = 2000,
-    ):
-        """初始化数据集，加载 SNP 数据并执行滑动窗口分块与动态填充。
-
-        Parameters
-        ----------
-        snp_file : str
-            SNP 数据文件路径（``.npy`` 格式）。
-        pheno_dir : str
-            表型 CSV 文件存放目录。
-        phenotype_names : list[str]
-            需要加载的表型名称列表。
-        chunk_size : int, optional
-            每个滑动窗口的 SNP 位点数（窗口大小），默认 ``12000``。
-        overlap : int, optional
-            相邻窗口之间的重叠位点数，默认 ``2000``。
-
-        Raises
-        ------
-        FileNotFoundError
-            当 ``snp_file`` 指向的文件不存在时抛出。
-        """
-        # 1. 检查文件是否存在
-        if not Path(snp_file).exists():
-            raise FileNotFoundError(f"SNP文件不存在: {snp_file}")
-
-        # 2. 集中转换：剂量0/1/2 → 模型类别1/2/3；-1/NaN → 缺失类别0。
-        self.snp = dosage_to_model_codes(np.load(snp_file))
-
-        # 计算滑动步长
-        self.chunks_size = chunk_size
-        self.overlap = overlap
-        self.step_size = chunk_size - overlap  # 例如: 12000 - 2000 = 10000
-
-        # 1. 获取当前数据的实际特征长度
-        num_samples, current_length = self.snp.shape
-
-        # 2. 动态计算：为了让最后一个窗口也完整，序列总长度至少需要达到多少
-        # 如果刚好能整除或少一部分，我们需要计算出“超越当前长度的下一个完美对齐长度”
-        if current_length <= chunk_size:
-            # 如果总长度还不如一个窗口大，直接补满一个窗口
-            self.target_length = chunk_size
-            self.num_chunks = 1
-        else:
-            # 减去第一个窗口后，计算剩余部分需要多少个步长(step_size)能覆盖，向上取整
-            remaining_length = current_length - chunk_size
-            # 向上取整计算：(A + B - 1) // B 是整数除法向上取整的快捷写方法
-            num_extra_steps = (remaining_length + self.step_size - 1) // self.step_size
-
-            # 最终的完美对齐总长度
-            self.target_length = chunk_size + num_extra_steps * self.step_size
-            # 动态生成的总块数
-            self.num_chunks = 1 + num_extra_steps
-
-        # 3. 动态边界填充 (Padding)
-        # 此时 target_length 一定是 >= current_length 的
-        if current_length < self.target_length:
-            pad_width = self.target_length - current_length
-            # 创建填充矩阵 (全 0 矩阵代表全为缺失值)
-            padding = np.zeros((num_samples, pad_width), dtype=self.snp.dtype)
-            self.snp = np.concatenate([self.snp, padding], axis=1, dtype=self.snp.dtype)
-        self.snp = model_code_tensor(self.snp)  # 方便使用 unfold 函数
-
-        print(
-            f"数据加载完毕。SNP 原始长度: {current_length}，填充后形状: {self.snp.shape}，动态切分为 {self.num_chunks} 块"
-        )
-
-        # 4. 加载并归一化表型
+    def __init__(self, snp_file: str, pheno_dir: str, phenotype_names: list[str],
+                 chunk_size: int = 12000, overlap: int = 2000):
+        if (isinstance(chunk_size, bool) or not isinstance(chunk_size, Integral) or chunk_size < 1
+                or isinstance(overlap, bool) or not isinstance(overlap, Integral)
+                or not 0 <= overlap < chunk_size):
+            raise ValueError("chunk_size 必须为正整数，overlap 必须为 [0, chunk_size) 内的整数")
+        codes = dosage_to_model_codes(np.load(snp_file, allow_pickle=False))
+        n_samples, self.original_length = codes.shape
+        if not n_samples or not self.original_length:
+            raise ValueError("SNP 个体数和原始有效长度必须非零")
+        self.sample_ids = np.arange(n_samples, dtype=np.int64)
+        self.sample_id_source = "row_index"  # 输入没有已验证的生物学个体 ID。
+        self.chunk_size = self.chunks_size = int(chunk_size)  # 保留旧 chunks_size 属性。
+        self.overlap = int(overlap)
+        self.step_size = self.chunk_size - self.overlap
+        extra = max(0, self.original_length - self.chunk_size)
+        self.num_chunks = 1 + (extra + self.step_size - 1) // self.step_size
+        self.target_length = self.chunk_size + (self.num_chunks - 1) * self.step_size
+        self.padding_mask = torch.arange(self.target_length) >= self.original_length
+        self.valid_position_mask = ~self.padding_mask
+        self.chunk_padding_mask = self.padding_mask.unfold(0, self.chunk_size, self.step_size).contiguous()
+        self.chunk_valid_mask = ~self.chunk_padding_mask
+        self.chunk_starts = torch.arange(self.num_chunks) * self.step_size
+        self.chunk_valid_lengths = self.chunk_valid_mask.sum(dim=1)
+        codes = np.pad(codes, ((0, 0), (0, self.target_length - self.original_length)))
+        self.snp = model_code_tensor(codes)
         self.pheno_dir = pheno_dir
         self.phenotype_names = phenotype_names
-        self.phenotype = self.load_phenotypes()  # 加载表型
-        self.phenotype_norm = self.apply_global_zscore_norm()  # 归一化表型
+        self.phenotype = self.load_phenotypes()
+        self.time_points = self.phenotype.shape[2]
+        if len(self.phenotype) != n_samples:
+            raise ValueError("SNP 与表型的个体行数不一致，不能复用个体 split")
 
-    def load_phenotypes(self):
-        """加载并合并所有表型数据（不进行归一化）。
+    def load_phenotypes(self) -> np.ndarray:
+        """保留 CSV 列顺序及原始数值；缺失表型明确报错，不静默填补。"""
+        names = self.phenotype_names
+        if not names or len(set(names)) != len(names):
+            raise ValueError("phenotype_names 必须非空且互异")
+        blocks = []
+        self.time_labels = None
+        for name in names:
+            frame = pd.read_csv(Path(self.pheno_dir) / f"{name}.csv")
+            labels = [str(column) for column in frame.columns]
+            if self.time_labels is not None and labels != self.time_labels:
+                raise ValueError("各表型 CSV 的时间列和顺序必须一致")
+            self.time_labels = labels
+            block = frame.to_numpy(dtype=np.float32)
+            if not block.size or not np.isfinite(block).all():
+                raise ValueError(f"表型 {name} 存在缺失/非有限值；phenotype_missing_strategy=error，禁止用全体或 test 统计填补")
+            if blocks and block.shape != blocks[0].shape:
+                raise ValueError("各表型的个体数和时间点数必须一致")
+            blocks.append(block)
+        return np.stack(blocks, axis=1)
 
-        遍历 ``phenotype_names`` 中的每个表型名称，读取对应 CSV 文件，
-        沿表型维度拼接为统一的三维数组。
-
-        Returns
-        -------
-        pheno_data : np.ndarray
-            合并后的表型数据，形状为 ``(n_sample, n_pheno, n_time_points)``。
-        """
-        phenotypes = []
-
-        # 遍历每个表型文件
-        for phenotype_name in self.phenotype_names:
-            phenotype = pd.read_csv(Path(f"{self.pheno_dir}/{phenotype_name}.csv"))
-            phenotype = phenotype.values[:, np.newaxis, :].astype(np.float32)
-            phenotypes.append(phenotype)
-
-        # 合并所有表型数据: [n_sample, n_pheno, n_time_points]
-        pheno_data = np.concatenate(phenotypes, axis=1)
-        return pheno_data
+    def __len__(self) -> int:
+        return len(self.snp)
 
     def apply_global_zscore_norm(self):
-        """对表型数据执行逐表型的全局 Z-score 归一化。
-
-        对每个表型独立计算其在所有样本和时间点上的全局均值与标准差，
-        然后执行 ``(x - mean) / std`` 标准化。
-
-        Returns
-        -------
-        pheno_norm : np.ndarray
-            归一化后的表型数据，形状与 ``self.phenotype`` 相同，
-            即 ``(n_sample, n_pheno, n_time_points)``。
-        """
-        # 深拷贝数据，防止直接修改传入的原始数组引用的数据
-        pheno_norm = np.copy(self.phenotype)
-
-        # 获取表型数量 (即第 1 维度的大小)
-        num_phenotypes = self.phenotype.shape[1]
-
-        # 遍历每一个表型进行独立的全局归一化
-        for i in range(num_phenotypes):
-            # 提取当前第 i 个表型的所有样本和所有时间点数据
-            # current_pheno_data 的形状为 [N, T]
-            current_pheno_data = self.phenotype[:, i, :]
-
-            # 计算该表型在所有样本和时间点上的全局均值和标准差
-            mean = np.mean(current_pheno_data)
-            std = np.std(current_pheno_data)
-
-            # 加上一个极小的值 (epsilon)，防止当所有数据相同时标准差为 0 导致除以 0 的错误 (NaN)
-            if std == 0:
-                std = 1e-8
-
-            # 进行 Z-score 计算: (x - mean) / std
-            # 利用 numpy 的广播机制，直接对 [N, T] 形状的数组进行批量计算，并赋值回原位置
-            pheno_norm[:, i, :] = (current_pheno_data - mean) / std
-
-        return pheno_norm
-
-    def __len__(self):
-        """返回数据集中的样本数量。"""
-        return self.snp.shape[0]
+        raise ValueError("禁止在原始 Dataset 上拟合表型统计；请向 get_mae_dataloaders 传入 IndividualSplit")
 
     def __getitem__(self, idx):
-        """获取单个样本，使用 ``unfold`` 将 SNP 序列切分为多个滑动窗口子块。"""
-        sample_snps = self.snp[idx]
-        # 用 unfold 动态切块
-        x_chunks = sample_snps.unfold(
-            dimension=0, size=self.chunks_size, step=self.step_size
-        )
-        return x_chunks.contiguous(), self.phenotype_norm[idx]
+        chunks = self.snp[idx].unfold(0, self.chunk_size, self.step_size).contiguous()
+        return chunks, self.phenotype[idx]
+
+    def sample_with_metadata(self, idx: int) -> dict:
+        """可复用的数据接口；第6步再接入模型注意力、池化和重建损失。"""
+        chunks, phenotype = self[idx]
+        return {"snp": chunks, "phenotype": phenotype, "sample_id": self.sample_ids[idx],
+                "padding_mask": self.chunk_padding_mask,
+                "valid_position_mask": self.chunk_valid_mask,
+                "missing_genotype_mask": (chunks == 0) & self.chunk_valid_mask,
+                "original_length": self.original_length}
 
 
-# ================================
-# 划分训练/验证/测试集的工厂函数
-# ================================
-def get_mae_dataloader(
-    dataset: ConvAEDataset,
-    batch_size: int = 32,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.2,
-    seed: int = 73,
-    num_workers: int = 8,
-    indices: IndividualSplit | None = None,
-) -> tuple[DataLoader, DataLoader]:
-    """按指定比例划分训练/验证集并构建 DataLoader。
+class NormalizedPhenotypeSubset(Subset):
+    """保留原始行号和 sample_id 顺序的独立归一化视图，不修改原始 Dataset。"""
 
-    使用 ``random_split`` 对 ``ConvAEDataset`` 进行互斥划分，
-    创建训练集（shuffle=True）和验证集（shuffle=False）的 DataLoader。
+    def __init__(self, dataset: Dataset, indices: np.ndarray, phenotype: torch.Tensor):
+        super().__init__(dataset, indices.tolist())
+        self.normalized_phenotype = phenotype
+        self.sample_ids = np.asarray(getattr(dataset, "sample_ids", np.arange(len(dataset))))[indices]
 
-    Parameters
-    ----------
-    dataset : ConvAEDataset
-        ConvAE 数据集实例，包含已分块和归一化的 SNP 与表型数据。
-    batch_size : int, optional
-        每个 DataLoader 的批次大小，默认 ``32``。
-    train_ratio : float, optional
-        训练集所占比例，默认 ``0.8``。
-    val_ratio : float, optional
-        验证集所占比例，默认 ``0.2``。
-    seed : int, optional
-        随机数种子，默认 ``73``。
-    num_workers : int, optional
-        DataLoader 的数据加载线程数，默认 ``8``。
-    indices : IndividualSplit | None, optional
-        共享三集合划分；仅返回其中 train/val loader，test 个体保留。
+    @property
+    def chunk_padding_mask(self):
+        return self.dataset.chunk_padding_mask
 
-    Returns
-    -------
-    train_loader : DataLoader
-        训练集 DataLoader（shuffle=True）。
-    val_loader : DataLoader
-        验证集 DataLoader（shuffle=False）。
-    """
+    def __getitem__(self, idx):
+        chunks, _ = self.dataset[self.indices[idx]]
+        return chunks, self.normalized_phenotype[idx]
 
+    def __getitems__(self, indices):
+        # Subset 自带的批量接口会跳过本类 __getitem__，必须显式分派到归一化视图。
+        return [self[idx] for idx in indices]
+
+
+@dataclass
+class MAEDataLoaders:
+    train_loader: DataLoader
+    val_loader: DataLoader
+    test_loader: DataLoader
+    scalers: dict
+    split: IndividualSplit
+
+
+def get_mae_dataloaders(dataset: Dataset, indices: IndividualSplit, batch_size: int = 32,
+                        num_workers: int = 8, seed: int = 73) -> MAEDataLoaders:
+    """只接受已确定的三集合划分，只在 train phenotype 上拟合全局 Z-score。"""
+    ids = np.asarray(getattr(dataset, "sample_ids", np.arange(len(dataset))))
+    source = getattr(dataset, "sample_id_source", "row_index")
+    validate_individual_split(indices, n_samples=len(dataset),
+                              sample_ids=ids.tolist() if source == "provided" else None)
+    if ids.tolist() != indices.metadata["sample_ids"]:
+        raise ValueError("Dataset sample_id 顺序与 split 不一致")
+    if not len(indices.train_idx) or not len(indices.val_idx):
+        raise ValueError("ConvAE train 和 val 必须非空；test 可保留为空以兼容旧两集合实验")
+    raw = np.asarray(dataset.phenotype, dtype=np.float32)
+    names = dataset.phenotype_names
+    if (raw.ndim != 3 or raw.shape[0] != len(dataset) or raw.shape[1] != len(names)
+            or not raw.shape[2] or not np.isfinite(raw).all()):
+        raise ValueError("原始表型必须为有限值 [个体, 表型, 时间]；缺失策略为 error")
+    train = raw[indices.train_idx]
+    scalers = {"norm_method": "global", "phenotype_names": list(names),
+               "pheno_meta": {"scalers": {
+                   name: StandardScaler().fit(train[:, p].reshape(-1, 1))
+                   for p, name in enumerate(names)
+               }}}
+    loaders = []
     generator = torch.Generator().manual_seed(seed)
+    for role, rows in zip(("train", "val", "test"),
+                          (indices.train_idx, indices.val_idx, indices.test_idx)):
+        norm = (transform_phenotypes(raw[rows], scalers) if len(rows)
+                else torch.empty((0, len(names), raw.shape[2]), dtype=torch.float32))
+        view = NormalizedPhenotypeSubset(dataset, rows, norm)
+        loaders.append(DataLoader(view, batch_size=batch_size, shuffle=role == "train",
+                                  num_workers=num_workers, pin_memory=torch.cuda.is_available(),
+                                  generator=generator if role == "train" else None))
+    return MAEDataLoaders(*loaders, scalers=scalers, split=indices)
 
+
+def get_mae_dataloader(dataset: Dataset, batch_size: int = 32, train_ratio: float = 0.8,
+                       val_ratio: float = 0.2, seed: int = 73, num_workers: int = 8,
+                       indices: IndividualSplit | None = None) -> tuple[DataLoader, DataLoader]:
+    """兼容旧的两项返回值；归一化改为只 fit train，test 留给新三集合接口。"""
     if indices is None:
-        # 未指定共享划分时，保持原有两集合行为。
-        train_subset, val_subset = random_split(
-            dataset, lengths=[train_ratio, val_ratio], generator=generator
-        )
-    else:
-        validate_split_indices(
-            indices.train_idx, indices.val_idx, indices.test_idx, len(dataset)
-        )
-        train_subset = Subset(dataset, indices.train_idx.tolist())
-        val_subset = Subset(dataset, indices.val_idx.tolist())
-        # test_idx 保留给下游评估，不合并到 ConvAE 的训练集或验证集。
-
-    loader_kwargs = {
-        "batch_size": batch_size,
-        "num_workers": num_workers,
-        "pin_memory": torch.cuda.is_available(),  # 4090 加速
-    }
-
-    train_loader = DataLoader(train_subset, shuffle=True, **loader_kwargs)
-    val_loader = DataLoader(val_subset, shuffle=False, **loader_kwargs)
-
-    return train_loader, val_loader
+        indices = generate_split(len(dataset), ratios=(train_ratio, val_ratio, max(0.0, 1 - train_ratio - val_ratio)), seed=seed)
+    data = get_mae_dataloaders(dataset, indices, batch_size=batch_size,
+                              num_workers=num_workers, seed=seed)
+    return data.train_loader, data.val_loader

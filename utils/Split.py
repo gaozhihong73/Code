@@ -183,10 +183,27 @@ def save_split(split: IndividualSplit, path: str | Path) -> Path:
     return path
 
 
-def load_split(
-    path: str | Path,
+def validate_individual_split(
+    split: IndividualSplit,
     *,
     n_samples: int | None = None,
+    sample_ids: Sequence[str | int] | None = None,
+) -> None:
+    """同时验证内存 manifest 的元数据、互斥覆盖和当前个体身份顺序。"""
+    _validate_split(split)
+    if n_samples is not None or sample_ids is not None:
+        count, _, source, digest = _sample_identity(n_samples, sample_ids)
+        if count != split.metadata["n_samples"]:
+            raise ValueError("当前样本数与划分文件不匹配")
+        if (
+            source != split.metadata["sample_id_source"]
+            or digest != split.metadata["sample_ids_sha256"]
+        ):
+            raise ValueError("当前 sample_ids 类型、顺序或哈希与划分文件不匹配")
+
+
+def load_split(
+    path: str | Path, *, n_samples: int | None = None,
     sample_ids: Sequence[str | int] | None = None,
 ) -> IndividualSplit:
     """加载并校验；提供当前样本数/ID 时，严格检查身份与行顺序。"""
@@ -197,16 +214,7 @@ def load_split(
             archive["train_idx"].copy(), archive["val_idx"].copy(),
             archive["test_idx"].copy(), json.loads(str(archive["metadata"].item())),
         )
-    _validate_split(result)
-    if n_samples is not None or sample_ids is not None:
-        count, _, source, digest = _sample_identity(n_samples, sample_ids)
-        if count != result.metadata["n_samples"]:
-            raise ValueError("当前样本数与划分文件不匹配")
-        if (
-            source != result.metadata["sample_id_source"]
-            or digest != result.metadata["sample_ids_sha256"]
-        ):
-            raise ValueError("当前 sample_ids 类型、顺序或哈希与划分文件不匹配")
+    validate_individual_split(result, n_samples=n_samples, sample_ids=sample_ids)
     return result
 
 

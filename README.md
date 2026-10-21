@@ -43,7 +43,7 @@ DynaGS/
 │   └── ConvAE_Config.py      #   ConvAE 配置
 ├── model/                    # 模型定义
 │   ├── TFPP.py               #   Wide-Deep Transformer 主模型
-│   └── ConvAE.py             #   卷积自编码器
+│   └── ConvAE.py             #   带表型辅助任务的 masked autoencoder
 ├── trainer/                  # 训练器
 │   ├── TFPP_Trainer.py       #   主模型训练器
 │   ├── Sim_TFPP_Trainer.py   #   模拟数据训练器
@@ -144,7 +144,7 @@ dataset/maize/
 |------|---------------|------------|
 | 观测基因型 | `0 / 1 / 2` | `1 / 2 / 3` |
 | 原始缺失 | `-1` 或 `NaN`（不能直接进入筛选） | `0` |
-| ConvAE 边界填充 | 不参与筛选 | `0`，与现有缺失类别共用 |
+| ConvAE 边界填充 | 不参与筛选 | `0`，由独立 padding mask 区分真实缺失 |
 
 `dosage_to_model_codes()` 显式编码；`model_codes_to_dosage()` 将类别0恢复为缺失标记 `-1`。
 `validate_dosage()` 与 `prepare_screening_dosage()` 保证 GWAS/DC-SIS 只接收完整的离散剂量。
@@ -222,13 +222,70 @@ split = load_split("splits/example.npz", sample_ids=["maize-A", "maize-B", "maiz
 ConvAE 通过 `ConvAEConfig(split_file="splits/maize_seed73.npz")` 复用文件，
 只将其中 train/val 个体传给训练/验证 loader，test 个体保持留出。
 两个 loader 也支持 `indices=split`，K 折 loader 继续接收三组显式索引并校验覆盖和互斥。
-每行个体的全部时间点始终一起取出。普通 TFPP 已将筛选移动到划分后；ConvAE 的预处理时机尚未迁移。
+每行个体的全部时间点始终一起取出。普通/折内 TFPP 筛选和 ConvAE 表型归一化均只拟合 train 个体。
 
 快速 CPU 测试（使用合成数据与临时目录，不需要玉米数据或 GPU）：
 
 ```bash
 .venv/bin/python -B -m unittest discover -s tests -v
 ```
+
+### ConvAE 的共享划分与表型归一化
+
+ConvAE 沿用现有名称，实际为带表型辅助任务的 masked autoencoder；本步骤不增加卷积层或 TFPP 连续输入头。
+`ConvAEDataset` 只加载原始表型、类别 SNP、稳定行索引 sample_id 和分块信息，不计算全体均值/标准差。
+数据流为：原始数据 → 已确定的 IndividualSplit → train 表型拟合逐表型全局 StandardScaler →
+仅 transform train/val/test → 独立归一化视图。原始 Dataset 不被归一化结果覆盖，test 不进入训练或早停。
+表型含 NaN/Inf 时采用 `phenotype_missing_strategy=error`，不从 test 或全体样本估算填充值。
+
+```bash
+# 只准备数据，不初始化模型或运行训练；使用 TFPP 保存的普通 split
+.venv/bin/python -B train_convae.py --prepare_only --exp_name maize_mae \
+  --split_file outputs/tfpp/EXP/preprocessing/split.npz \
+  --snp_file dataset/maize/snp/snp_50000.npy --device cpu --num_workers 0
+
+# 与 TFPP K 折比较时，原样使用指定 fold 的三组索引
+.venv/bin/python -B train_convae.py --prepare_only --exp_name maize_mae_cv \
+  --split_file outputs/tfpp/EXP/folds/fold_01/preprocessing/split.npz \
+  --snp_file dataset/maize/snp/snp_50000.npy --device cpu --num_workers 0
+```
+
+API 可直接传内存划分：`ConvAETrainer(config, indices=split, initialize_model=False)`；
+此时不要同时设置 `config.split_file`。`get_mae_dataloaders(dataset, split, ...)` 返回
+train/val/test loader、scalers 和 split 的 `MAEDataLoaders`；旧 `get_mae_dataloader()` 仍返回 train/val 两项，
+但改为只用 train 拟合。两者的 batch 均保留 `(chunks, normalized_phenotype)` 格式。
+直接访问原始 Dataset 则返回 `(chunks, raw_phenotype)`；旧 `phenotype_norm` 不再存在，
+调用 Dataset 的旧归一化方法会明确报错，应改用固定 split 后的 loader。
+
+`padding_mask` 为长度 target_length 的 bool 向量，True 只表示结构性 padding；
+`chunk_padding_mask` 为 `[num_chunks, chunk_size]`，`chunk_valid_mask` 为其反值。
+`original_length` 记录原始 SNP 有效长度，`chunk_starts`、`chunk_valid_lengths` 可恢复每块的原始位置。
+`sample_with_metadata(i)` 提供真实缺失 mask、padding mask 和 sample_id：真实缺失类别0仍是有效位置，
+不能把 `SNP == 0` 当作 padding。mask 如何用于模型注意力、池化和重建损失留到第6步。
+
+数据产物保存于 `outputs/convae/<exp_name>/<split或fold标识>_<索引内容哈希>/`：
+
+```text
+config.json
+preprocessing/preprocessing.json   # schema 3，编码/缺失策略、个体身份、时间列、chunk 契约与哈希
+preprocessing/split.npz            # 实际使用的完整 manifest 副本，保留 TFPP fold 信息
+preprocessing/padding_mask.npy
+preprocessing/chunk_padding_mask.npy
+scalers/scaler.pkl                 # 与 TFPP 同格式，支持 transform 和反归一化
+```
+
+`load_convae_preprocessing(path, dataset=..., config=...)` 校验 split/fold、sample_id 顺序、
+表型和时间点、编码版本、原始有效长度、chunk 参数及文件 SHA-256；缺失/篡改时失败，不重新 fit。
+当前 sample_id 是稳定行索引，不是生物学 ID。默认未显式提供时间坐标时保留 CSV 列名和顺序，不假定真实天数；
+可用 `--time_coordinates` 声明逐列坐标。
+
+兼容性变化：ConvAEConfig 默认比例现与 TFPP 一致为 0.8/0.1/0.1；None/auto 使用共享 splits/ 命名规则，
+显式 split_file 必须已存在，不再为缺失的 fold 文件静默生成随机划分。旧80/20实验仍可显式设置
+train_ratio=0.8、val_ratio=0.2、test_ratio=0，test 保持为空。
+输出不再直接写入共享的 outputs/convae 根目录；同目录下不同数据契约/配置会拒绝覆盖，应使用新 exp_name。
+旧本地 ConvAE_Train.py 被仓库忽略；可版本控制的命令入口为 train_convae.py。
+自动潜在特征导出已暂停，后续步骤再实现；当前模型固定14维表型头和 use_pheno_help 行为尚未调整，
+正式训练仍受旧模型限制，本步骤仅验证数据管线。
 
 ### 快速开始
 

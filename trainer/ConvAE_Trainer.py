@@ -11,17 +11,19 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
 from torch.utils.data import DataLoader
 
 from config.ConvAE_Config import ConvAEConfig
-from dataloader import ConvAEDataset, get_mae_dataloader
+from dataloader import ConvAEDataset, get_mae_dataloaders
 from model.ConvAE import ConvAE
 from trainer._scheduler import WarmupSequentialLR
 from utils import Logger
-from utils.Split import load_or_create_split
+from utils.Split import (IndividualSplit, default_split_path, load_or_create_split, load_split)
+from utils.ConvAE_Preprocessing import convae_split_fingerprint, save_convae_preprocessing
 
 
 class ConvAETrainer:
     """ConvAE 训练器"""
 
-    def __init__(self, config: ConvAEConfig):
+    def __init__(self, config: ConvAEConfig, *, indices: IndividualSplit | None = None,
+                 initialize_model: bool = True):
         """初始化训练器并构建数据集与模型。"""
         # 保存配置
         self.config = config
@@ -29,12 +31,6 @@ class ConvAETrainer:
         # 保存目录参数
         self.pheno_dir = config.pheno_dir
         self.snp_file = config.snp_file
-
-        self.best_model_save_dir = Path(config.best_model_save_dir)
-        self.best_model_save_dir.mkdir(parents=True, exist_ok=True)
-
-        self.training_history_save_dir = Path(config.training_history_save_dir)
-        self.training_history_save_dir.mkdir(parents=True, exist_ok=True)
 
         # 数据集初始化
         self.phenotype_names = config.phenotype_names
@@ -44,6 +40,14 @@ class ConvAETrainer:
         self.train_ratio = config.train_ratio
         self.val_ratio = config.val_ratio
         self.test_ratio = config.test_ratio
+
+        # 固定共享划分、只在 train 拟合 scaler，并在创建模型前持久化数据契约。
+        self._prepare_data(indices)
+        config = self.config
+        self.best_model_save_dir = Path(config.best_model_save_dir)
+        self.best_model_save_dir.mkdir(parents=True, exist_ok=True)
+        self.training_history_save_dir = Path(config.training_history_save_dir)
+        self.training_history_save_dir.mkdir(parents=True, exist_ok=True)
 
         # 日志记录器
         self.log_file = config.log_file
@@ -77,12 +81,11 @@ class ConvAETrainer:
         self.is_save_training_info = config.is_save_training_info
 
         # 模型初始化
-        self.model = self._create_model()
+        self.model = self._create_model() if initialize_model else None
 
         # ConvAE 专有
         self.use_pheno_help = config.use_pheno_help  # TODO 先不考虑不使用表型辅助的情况
         self.compressed_snp_save_dir = Path(config.compressed_snp_save_dir)
-        self.compressed_snp_save_dir.mkdir(parents=True, exist_ok=True)
 
         # 损失函数设置：
         # SNPs 是 0, 1, 2, 3 的离散类别，使用交叉熵计算重建损失
@@ -97,10 +100,50 @@ class ConvAETrainer:
         self.is_cuda = "cuda" in str(self.device)
         self.scaler = torch.GradScaler(device="cuda", enabled=self.is_cuda)
 
+    def _prepare_data(self, indices: IndividualSplit | None = None) -> None:
+        """接受 TFPP 普通/fold manifest 或内存 IndividualSplit，不猜测 fold 划分。"""
+        config = self.config
+        source = None
+        if indices is not None:
+            if config.split_file is not None:
+                raise ValueError("传入 IndividualSplit 时不要同时设置 split_file")
+            split = indices
+        elif config.split_file not in (None, "auto"):
+            source = Path(config.split_file)
+            if not source.is_file():
+                raise FileNotFoundError(
+                    f"共享 split/fold 文件不存在: {source}；请先保存 TFPP manifest，"
+                    "或使用 split_file=None/auto 生成普通共享划分，禁止猜测 fold"
+                )
+            split = load_split(source, n_samples=self.num_sample)
+        else:
+            ratios = (config.train_ratio, config.val_ratio, config.test_ratio)
+            source = default_split_path(self.num_sample, ratios=ratios, seed=config.seed)
+            split = load_or_create_split(source, self.num_sample, ratios=ratios, seed=config.seed)
+        fingerprint = convae_split_fingerprint(split)
+        data = get_mae_dataloaders(
+            self.dataset, split, batch_size=config.batch_size,
+            num_workers=config.num_workers, seed=config.seed,
+        )
+        fold = split.metadata.get("fold_index")
+        tag = "split" if fold is None else f"fold_{fold:02d}"
+        tag += "_" + fingerprint[:16]
+        self.config = config.model_copy(update={"split_tag": tag})
+        self.data_pipeline = data
+        self.split, self.scalers = data.split, data.scalers
+        self.train_loader, self.val_loader, self.test_loader = (
+            data.train_loader, data.val_loader, data.test_loader,
+        )
+        self.preprocessing_metadata = save_convae_preprocessing(
+            self.dataset, data, self.config, split_source=source,
+        )
+
     def _create_model(self) -> ConvAE:
         """获取模型。"""
         # 基于 DataLoader 计算出的切块数量，初始化 ConvAE
-        return ConvAE(num_chunks=self.dataset.num_chunks).to(self.device)
+        if self.dataset.chunk_size % 20:
+            raise ValueError("当前 ConvAE 模型要求 chunk_size 为20的倍数；数据管线可单独用 initialize_model=False 检查任意分块")
+        return ConvAE(chunk_size=self.dataset.chunk_size, num_chunks=self.dataset.num_chunks).to(self.device)
 
     def _create_dataset(self) -> ConvAEDataset:
         """获取数据集对象。"""
@@ -108,6 +151,7 @@ class ConvAETrainer:
             snp_file=self.snp_file,
             pheno_dir=self.pheno_dir,
             phenotype_names=self.phenotype_names,
+            chunk_size=self.config.chunk_size, overlap=self.config.overlap,
         )
 
     def _create_optimizer_and_scheduler(self):
@@ -284,34 +328,15 @@ class ConvAETrainer:
     # ==========================================================================
     def train(self):
         """ConvAE 主训练流程。"""
+        if self.model is None:
+            raise ValueError("initialize_model=False 仅准备数据管线，不能训练；请在模型阶段显式初始化模型")
         self.logger.info("=" * 80)
         self.logger.info("开始 ConvAE 训练")
         self.logger.info("=" * 80)
         self._log_configuration()
 
-        indices = None
-        if self.config.split_file is not None:
-            indices = load_or_create_split(
-                self.config.split_file,
-                n_samples=self.num_sample,
-                ratios=(self.train_ratio, self.val_ratio, self.test_ratio),
-                seed=self.seed,
-            )
-            self.logger.info(
-                f"使用个体划分 {self.config.split_file}: seed={indices.metadata['seed']}, "
-                f"比例={indices.metadata['ratios']}, sample_id_source=row_index"
-            )
-
-        # 根据 DataLoader 文件获取划分好的 loader
-        train_loader, val_loader = get_mae_dataloader(
-            self.dataset,
-            self.batch_size,
-            val_ratio=self.val_ratio,
-            train_ratio=self.train_ratio,
-            seed=self.seed,
-            num_workers=self.num_workers,
-            indices=indices,
-        )
+        # 初始化时已固定划分和 scaler；test_loader 始终不参与训练或早停。
+        train_loader, val_loader = self.train_loader, self.val_loader
 
         # 创建优化器和调度器
         optimizer, scheduler = self._create_optimizer_and_scheduler()
@@ -385,7 +410,7 @@ class ConvAETrainer:
         # 5. 保存权重、日志及实施特征压缩
         if self.config.is_save_training_info and best_model_state is not None:
             self._save_model_info(best_model_state, best_val_loss, best_epoch, history)
-            self._compress_data(best_model_state)
+            # 最终潜在特征导出留到后续步骤，本步骤不自动导出。
 
     def _save_model_info(
         self, state: dict[str, Any], best_loss: float, best_epoch: int, history: dict
@@ -464,6 +489,9 @@ class ConvAETrainer:
         self.logger.info(f"    train_ratio: {self.train_ratio}")
         self.logger.info(f"    val_ratio: {self.val_ratio}")
         self.logger.info(f"    test_ratio: {self.test_ratio}")
+        self.logger.info(f"    split_tag: {self.config.split_tag}")
+        self.logger.info(f"    split_sha256: {self.preprocessing_metadata['split_sha256']}")
+        self.logger.info(f"    train/val/test: {len(self.split.train_idx)}/{len(self.split.val_idx)}/{len(self.split.test_idx)}")
 
         self.logger.info("-" * 60)
         self.logger.info("训练超参数:")

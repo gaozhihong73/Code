@@ -1,16 +1,19 @@
-"""ConvAE 卷积自编码器的训练配置定义。
+"""ConvAE（带表型辅助任务的 masked autoencoder）的训练配置定义。
 
-本模块定义 ConvAEConfig (Pydantic BaseModel)，管理卷积自编码器 (ConvAE) 训练所需的
+本模块定义 ConvAEConfig (Pydantic BaseModel)，管理现有 masked autoencoder 训练所需的
 超参数、数据路径和输出目录。ConvAE 用于将高维 SNP 数据压缩为低维潜在表示，
 压缩结果可供下游 TFPP 模型使用。
 """
 
+from datetime import datetime
+from typing import Literal
+
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ConvAEConfig(BaseModel):
-    """ConvAE 卷积自编码器的训练配置。
+    """ConvAE 数据与训练配置；名称沿用，模型架构在本步骤保持原样。
 
     损失函数由 recon_weight (重构损失) 和 pheno_weight (表型辅助损失) 加权组合，
     两者之和应为 1.0。use_pheno_help 控制是否启用表型辅助压缩分支。
@@ -18,6 +21,9 @@ class ConvAEConfig(BaseModel):
     """
 
     use_pheno_help: bool = True  # 是否使用表型辅助压缩
+    exp_name: str = Field(default_factory=lambda: f"exp_{datetime.now():%Y%m%d_%H%M%S}")
+    output_root: str = "outputs/convae"
+    split_tag: str | None = None  # trainer 根据完整个体划分内容确定，不依赖文件名。
 
     # 文件目录
     pheno_dir: str = "dataset/maize/cleaned_pheno"
@@ -57,17 +63,28 @@ class ConvAEConfig(BaseModel):
 
     # 数据集参数
     train_ratio: float = 0.8
-    val_ratio: float = 0.2
-    test_ratio: float = 0.0
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
+    chunk_size: int = Field(default=12000, ge=1)
+    overlap: int = Field(default=2000, ge=0)
+    time_coordinates: list[float] | None = None
+    phenotype_missing_strategy: Literal["error"] = "error"
     split_file: str | None = Field(
         default=None,
-        description="共享个体划分 .npz 路径；已有文件优先，不存在则生成，auto 使用 splits/；test 不参与训练/验证",
+        description="已有 TFPP 普通/fold manifest 路径；显式路径必须存在，None/auto 在共享 splits/ 中生成或复用",
     )
+
+    @model_validator(mode="after")
+    def _validate_chunks(self):
+        if self.overlap >= self.chunk_size:
+            raise ValueError("overlap 必须小于 chunk_size")
+        return self
 
     @property
     def output_dir(self) -> str:
         """训练输出文件的保存总目录"""
-        return "outputs/convae"
+        base = f"{self.output_root}/{self.exp_name}"
+        return base if self.split_tag is None else f"{base}/{self.split_tag}"
 
     @property
     def best_model_save_dir(self) -> str:

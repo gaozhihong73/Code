@@ -1,4 +1,4 @@
-from .ConvAE_DataLoader import ConvAEDataset, get_mae_dataloader
+from .ConvAE_DataLoader import ConvAEDataset, get_mae_dataloader, get_mae_dataloaders
 from .Sim_DataLoader import SimTFPPDataset, get_sim_dataloader
 from .TFPP_DataLoader import TFPPDataset, get_dataloader, get_dataloader_with_kfold
 
@@ -9,5 +9,6 @@ __all__ = [
     "get_dataloader",
     "get_dataloader_with_kfold",
     "get_mae_dataloader",
+    "get_mae_dataloaders",
     "get_sim_dataloader",
 ]

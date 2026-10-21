@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Dataset, random_split
 
@@ -279,9 +280,28 @@ class SplitTests(unittest.TestCase):
         dataset = ToyDataset()
         for kind, trainer_class, loader_name in (
             ("TFPP", TFPPTrainer, "get_dataloader"),
-            ("ConvAE", ConvAETrainer, "get_mae_dataloader"),
+            ("ConvAE", ConvAETrainer, "get_mae_dataloaders"),
         ):
             with self.subTest(kind=kind):
+                if kind == "ConvAE":
+                    directory = Path(self.temp.name)
+                    np.save(directory / "raw.npy", np.tile([[0, 1, 2]], (40, 1)))
+                    pd.DataFrame(dataset.phenotype[:, 0]).to_csv(directory / "toy.csv", index=False)
+                    config = ConvAEConfig(
+                        split_file=str(self.path), snp_file=str(directory / "raw.npy"),
+                        pheno_dir=str(directory), phenotype_names=["toy"],
+                        output_root=str(directory / "mae"), exp_name="shared",
+                        chunk_size=3, overlap=1, num_workers=0, device="cpu",
+                    )
+                    obj = ConvAETrainer(config, initialize_model=False)
+                    try:
+                        self.assert_same_indices(shared, obj.split)
+                        self.assertEqual(obj.test_loader.dataset.indices, shared.test_idx.tolist())
+                    finally:
+                        for handler in list(obj.logger.logger.handlers):
+                            handler.close()
+                            obj.logger.logger.removeHandler(handler)
+                    continue
                 module = importlib.import_module(f"trainer.{kind}_Trainer")
                 obj = trainer_class.__new__(trainer_class)
                 obj.config = (TFPPConfig if kind == "TFPP" else ConvAEConfig)(
