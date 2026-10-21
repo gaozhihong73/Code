@@ -100,10 +100,12 @@ class ConvAEDataset(Dataset):
 class NormalizedPhenotypeSubset(Subset):
     """保留原始行号和 sample_id 顺序的独立归一化视图，不修改原始 Dataset。"""
 
-    def __init__(self, dataset: Dataset, indices: np.ndarray, phenotype: torch.Tensor):
+    def __init__(self, dataset: Dataset, indices: np.ndarray, phenotype: torch.Tensor,
+                 include_sample_ids: bool = False):
         super().__init__(dataset, indices.tolist())
         self.normalized_phenotype = phenotype
         self.sample_ids = np.asarray(getattr(dataset, "sample_ids", np.arange(len(dataset))))[indices]
+        self.include_sample_ids = include_sample_ids
 
     @property
     def chunk_padding_mask(self):
@@ -111,7 +113,8 @@ class NormalizedPhenotypeSubset(Subset):
 
     def __getitem__(self, idx):
         chunks, _ = self.dataset[self.indices[idx]]
-        return chunks, self.normalized_phenotype[idx]
+        pair = (chunks, self.normalized_phenotype[idx])
+        return (*pair, self.sample_ids[idx]) if self.include_sample_ids else pair
 
     def __getitems__(self, indices):
         # Subset 自带的批量接口会跳过本类 __getitem__，必须显式分派到归一化视图。
@@ -128,7 +131,8 @@ class MAEDataLoaders:
 
 
 def get_mae_dataloaders(dataset: Dataset, indices: IndividualSplit, batch_size: int = 32,
-                        num_workers: int = 8, seed: int = 73) -> MAEDataLoaders:
+                        num_workers: int = 8, seed: int = 73,
+                        include_sample_ids: bool = False) -> MAEDataLoaders:
     """只接受已确定的三集合划分，只在 train phenotype 上拟合全局 Z-score。"""
     ids = np.asarray(getattr(dataset, "sample_ids", np.arange(len(dataset))))
     source = getattr(dataset, "sample_id_source", "row_index")
@@ -155,7 +159,7 @@ def get_mae_dataloaders(dataset: Dataset, indices: IndividualSplit, batch_size: 
                           (indices.train_idx, indices.val_idx, indices.test_idx)):
         norm = (transform_phenotypes(raw[rows], scalers) if len(rows)
                 else torch.empty((0, len(names), raw.shape[2]), dtype=torch.float32))
-        view = NormalizedPhenotypeSubset(dataset, rows, norm)
+        view = NormalizedPhenotypeSubset(dataset, rows, norm, include_sample_ids=include_sample_ids)
         loaders.append(DataLoader(view, batch_size=batch_size, shuffle=role == "train",
                                   num_workers=num_workers, pin_memory=torch.cuda.is_available(),
                                   generator=generator if role == "train" else None))

@@ -12,9 +12,13 @@ from torch.utils.data import DataLoader
 
 from config.ConvAE_Config import ConvAEConfig
 from dataloader import ConvAEDataset, get_mae_dataloaders
-from model.ConvAE import ConvAE
+from model.ConvAE import ConvAE, MASK_POLICY, MODEL_VERSION
 from trainer._scheduler import WarmupSequentialLR
 from utils import Logger
+from utils.Inference import file_sha256
+from utils.ConvAE_Objective import (
+    EMPTY_TARGET_POLICY, RECONSTRUCTION_POLICY, convae_loss_terms, fixed_reconstruction_masks,
+)
 from utils.Split import (IndividualSplit, default_split_path, load_or_create_split, load_split)
 from utils.ConvAE_Preprocessing import convae_split_fingerprint, save_convae_preprocessing
 
@@ -81,10 +85,14 @@ class ConvAETrainer:
         self.is_save_training_info = config.is_save_training_info
 
         # 模型初始化
+        torch.manual_seed(config.seed)
         self.model = self._create_model() if initialize_model else None
+        self.train_mask_generator = torch.Generator(device=config.device).manual_seed(config.seed)
+        self.selection_metric = config.selection_metric
+        self._prepare_validation_masks()
 
         # ConvAE 专有
-        self.use_pheno_help = config.use_pheno_help  # TODO 先不考虑不使用表型辅助的情况
+        self.use_pheno_help = config.use_pheno_help
         self.compressed_snp_save_dir = Path(config.compressed_snp_save_dir)
 
         # 损失函数设置：
@@ -103,6 +111,12 @@ class ConvAETrainer:
     def _prepare_data(self, indices: IndividualSplit | None = None) -> None:
         """接受 TFPP 普通/fold manifest 或内存 IndividualSplit，不猜测 fold 划分。"""
         config = self.config
+        if config.n_time_points is not None and config.n_time_points != self.dataset.time_points:
+            raise ValueError("phenotype 列数、time_coordinates 与 n_time_points 必须一致")
+        if config.n_phenotypes != self.dataset.phenotype.shape[1]:
+            raise ValueError("phenotype 维数与 n_phenotypes 不一致")
+        config = config.model_copy(update={"n_time_points": self.dataset.time_points})
+        self.config = config
         source = None
         if indices is not None:
             if config.split_file is not None:
@@ -123,7 +137,7 @@ class ConvAETrainer:
         fingerprint = convae_split_fingerprint(split)
         data = get_mae_dataloaders(
             self.dataset, split, batch_size=config.batch_size,
-            num_workers=config.num_workers, seed=config.seed,
+            num_workers=config.num_workers, seed=config.seed, include_sample_ids=True,
         )
         fold = split.metadata.get("fold_index")
         tag = "split" if fold is None else f"fold_{fold:02d}"
@@ -140,10 +154,43 @@ class ConvAETrainer:
 
     def _create_model(self) -> ConvAE:
         """获取模型。"""
-        # 基于 DataLoader 计算出的切块数量，初始化 ConvAE
-        if self.dataset.chunk_size % 20:
-            raise ValueError("当前 ConvAE 模型要求 chunk_size 为20的倍数；数据管线可单独用 initialize_model=False 检查任意分块")
-        return ConvAE(chunk_size=self.dataset.chunk_size, num_chunks=self.dataset.num_chunks).to(self.device)
+        config = self.config
+        return ConvAE(
+            chunk_size=self.dataset.chunk_size, patch_size=config.patch_size,
+            num_chunks=self.dataset.num_chunks, d_model=config.d_model, d_ext=config.d_ext,
+            n_phenotypes=config.n_phenotypes, n_time_points=config.n_time_points,
+            use_pheno_help=config.use_pheno_help, num_heads=config.num_heads,
+            encoder_layers=config.encoder_layers, decoder_layers=config.decoder_layers,
+            dropout=config.dropout,
+        ).to(self.device)
+
+    def _prepare_validation_masks(self) -> None:
+        """按 val sample_id 独立固定 mask，保存以便复现模型选择口径。"""
+        ids = self.val_loader.dataset.sample_ids
+        self.validation_masks = fixed_reconstruction_masks(
+            self.dataset.chunk_padding_mask, patch_size=self.config.patch_size, sample_ids=ids,
+            seed=self.config.seed, split_fingerprint=self.preprocessing_metadata["split_fingerprint"],
+            mask_ratio=self.config.val_mask_ratio,
+        )
+        self.validation_mask_rows = {json.dumps(value.item() if isinstance(value, np.generic) else value): i
+                                     for i, value in enumerate(ids)}
+        path = Path(self.config.output_dir) / "preprocessing" / "validation_masks.npz"
+        if path.exists():
+            with np.load(path, allow_pickle=False) as saved:
+                if (not np.array_equal(saved["sample_ids"], ids)
+                        or not np.array_equal(saved["patch_masks"], self.validation_masks.numpy())):
+                    raise ValueError("已有验证掩码与当前 seed/split/sample_id 不一致，请使用新实验目录")
+        else:
+            np.savez_compressed(path, sample_ids=ids, patch_masks=self.validation_masks.numpy())
+        self.validation_masks_sha256 = file_sha256(path)
+
+    def _validation_mask_for_ids(self, sample_ids) -> torch.Tensor:
+        values = sample_ids.tolist() if isinstance(sample_ids, torch.Tensor) else list(sample_ids)
+        try:
+            rows = [self.validation_mask_rows[json.dumps(value)] for value in values]
+        except KeyError as error:
+            raise ValueError("验证 batch 中的 sample_id 不属于保存的 val 集合") from error
+        return self.validation_masks[rows].to(self.device)
 
     def _create_dataset(self) -> ConvAEDataset:
         """获取数据集对象。"""
@@ -174,7 +221,7 @@ class ConvAETrainer:
                 total_iters=self.warmup_epochs,
             )
             main_scheduler = CosineAnnealingLR(
-                optimizer, T_max=self.epochs - self.warmup_epochs, eta_min=self.min_lr
+                optimizer, T_max=max(1, self.epochs - self.warmup_epochs), eta_min=self.min_lr
             )
             scheduler = WarmupSequentialLR(
                 optimizer,
@@ -191,256 +238,138 @@ class ConvAETrainer:
     # ==========================================================================
     # 核心循环：单轮训练与验证
     # ==========================================================================
-    def _train_epoch(
-        self, train_loader: DataLoader, optimizer: optim.Optimizer
-    ) -> tuple[float, float, float]:  # 传入 scheduler 以便按 step 更新
-        """训练一个 epoch 并返回各项损失。
-
-        Parameters
-        ----------
-        train_loader : DataLoader
-            训练数据加载器。
-        optimizer : optim.Optimizer
-            优化器。
-
-        Returns
-        -------
-        tuple[float, float, float]
-            平均总损失、平均重建损失和平均表型损失。
-        """
-        self.model.train()
-        num_batches = len(train_loader)
-        metrics = {"total": 0.0, "recon": 0.0, "pheno": 0.0}
-
-        optimizer.zero_grad()  # 在循环外初始化清空梯度
-
-        for batch_idx, (X_chunks, pheno_target) in enumerate(train_loader):
-            X_chunks = X_chunks.to(self.device)
-            pheno_target = pheno_target.to(self.device)
-
-            with torch.autocast(device_type="cuda", enabled=self.is_cuda):
-                _, pred_phenotype, pred_snps, _ = self.model(X_chunks, mask_ratio=0.5)
-
-                # 1. 计算重建损失
-                if self.recon_weight > 0 and pred_snps is not None:
-                    B, Num_Chunks, L = X_chunks.shape
-                    target_snps = X_chunks.view(
-                        B * Num_Chunks, self.model.num_patches, self.model.patch_size
+    def _run_epoch(self, loader: DataLoader, optimizer=None) -> tuple[float, float, float]:
+        """训练/验证共用同一目标，按 SNP/表型监督元素数汇总，避免 batch 大小改变口径。"""
+        training = optimizer is not None
+        self.model.train(training)
+        stats = dict(recon_sum=0.0, recon_count=0, pheno_sum=0.0, pheno_count=0, empty_batches=0)
+        if training:
+            optimizer.zero_grad(set_to_none=True)
+        pending_grad = False
+        for batch_idx, (chunks, phenotype, sample_ids) in enumerate(loader):
+            chunks, phenotype = chunks.to(self.device), phenotype.to(self.device)
+            padding = self.dataset.chunk_padding_mask.to(self.device)
+            selected = None if training else self._validation_mask_for_ids(sample_ids)
+            with torch.set_grad_enabled(training):
+                with torch.autocast(device_type="cuda", enabled=self.is_cuda):
+                    outputs = self.model(
+                        chunks, padding_mask=padding,
+                        mask_ratio=self.config.train_mask_ratio if training else self.config.val_mask_ratio,
+                        reconstruction_mask=selected, generator=self.train_mask_generator if training else None,
                     )
-                    pred_snps_ce = pred_snps.permute(0, 3, 1, 2)
-                    recon_loss = self.recon_criterion(pred_snps_ce, target_snps)
-                else:
-                    recon_loss = torch.tensor(0.0, device=self.device)
+                    terms = convae_loss_terms(outputs, chunks, phenotype, padding,
+                                              use_pheno_help=self.use_pheno_help)
+                    loss = terms.total(self.recon_weight, self.pheno_weight)
+                has_signal = ((terms.recon_count > 0 and self.recon_weight > 0)
+                              or (terms.pheno_count > 0 and self.pheno_weight > 0))
+                if training and has_signal:
+                    window_start = (batch_idx // self.accumulation_steps) * self.accumulation_steps
+                    window_size = min(self.accumulation_steps, len(loader) - window_start)
+                    self.scaler.scale(loss / window_size).backward()
+                    pending_grad = True
+            if training and ((batch_idx + 1) % self.accumulation_steps == 0 or batch_idx + 1 == len(loader)):
+                if pending_grad:
+                    self.scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                    self.scaler.step(optimizer)
+                    self.scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                pending_grad = False
+            stats["recon_sum"] += float(terms.recon_sum.detach())
+            stats["recon_count"] += terms.recon_count
+            stats["pheno_sum"] += float(terms.pheno_sum.detach())
+            stats["pheno_count"] += terms.pheno_count
+            stats["empty_batches"] += int(terms.recon_count == 0)
+        recon = stats["recon_sum"] / max(1, stats["recon_count"])
+        pheno = stats["pheno_sum"] / max(1, stats["pheno_count"])
+        setattr(self, "last_train_stats" if training else "last_val_stats", stats)
+        return self.recon_weight * recon + self.pheno_weight * pheno, recon, pheno
 
-                # 2. 计算表型损失
-                if self.pheno_weight > 0:
-                    pred_phenotype = pred_phenotype.view(pheno_target.shape[0], -1)
-                    pheno_target_flat = pheno_target.view(pheno_target.shape[0], -1)
-                    pheno_loss = self.pheno_criterion(pred_phenotype, pheno_target_flat)
-                else:
-                    pheno_loss = torch.tensor(0.0, device=self.device)
-
-                # 3. 加权求和并除以累积步数（关键：对 loss 平均，保证梯度量级与大 Batch 一致）
-                total_loss = (
-                    self.recon_weight * recon_loss + self.pheno_weight * pheno_loss
-                )
-                loss_scaled = total_loss / self.accumulation_steps
-
-            # 反向传播放大的梯度
-            self.scaler.scale(loss_scaled).backward()
-
-            # 触发权重更新的条件：达到了指定的累积步数，或者是当前 Epoch 的最后一个 Batch
-            if (batch_idx + 1) % self.accumulation_steps == 0 or (
-                batch_idx + 1
-            ) == num_batches:
-                # 优化器步进前，必须先 unscale 才能做梯度裁剪
-                self.scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), max_norm=self.config.grad_clip_norm
-                )
-
-                # 优化器更新与 Scaler 更新
-                self.scaler.step(optimizer)
-                self.scaler.update()
-                optimizer.zero_grad()  # 显式清空梯度，为下一次累积做准备
-
-            # 记录指标时，依然使用原始未缩放的 total_loss.item()
-            metrics["total"] += total_loss.item()
-            metrics["recon"] += recon_loss.item()
-            metrics["pheno"] += pheno_loss.item()
-
-        return (
-            metrics["total"] / num_batches,
-            metrics["recon"] / num_batches,
-            metrics["pheno"] / num_batches,
-        )
+    def _train_epoch(self, train_loader: DataLoader, optimizer: optim.Optimizer) -> tuple[float, float, float]:
+        return self._run_epoch(train_loader, optimizer)
 
     def _validate_epoch(self, val_loader: DataLoader) -> tuple[float, float, float]:
-        """验证一个 epoch 并返回各项损失。
+        return self._run_epoch(val_loader)
 
-        Parameters
-        ----------
-        val_loader : DataLoader
-            验证数据加载器。
-
-        Returns
-        -------
-        tuple[float, float, float]
-            平均总损失、平均重建损失和平均表型损失。
-        """
-        self.model.eval()
-        num_batches = len(val_loader)
-        metrics = {"total": 0.0, "recon": 0.0, "pheno": 0.0}
-
-        with torch.no_grad():
-            for X_chunks, pheno_target in val_loader:
-                X_chunks = X_chunks.to(self.device)
-                pheno_target = pheno_target.to(self.device)
-
-                with torch.autocast("cuda", enabled=self.is_cuda):
-                    # 注意：在 eval 模式下，ConvAE.py 中的 mask_ratio 将被忽略，pred_snps 返回 None
-                    _, pred_phenotype, _, _ = self.model(X_chunks, mask_ratio=0.0)
-
-                    # 验证时主要关注表型损失，因为解码器此时不生效 (遵循 ConvAE.py 逻辑)
-                    recon_loss = torch.tensor(0.0, device=self.device)
-
-                    pred_phenotype = pred_phenotype.view(pheno_target.shape[0], -1)
-                    pheno_target_flat = pheno_target.view(pheno_target.shape[0], -1)
-                    pheno_loss = self.pheno_criterion(pred_phenotype, pheno_target_flat)
-
-                    # 验证集的 Total Loss 保持与训练一致的加权
-                    total_loss = (
-                        self.recon_weight * recon_loss + self.pheno_weight * pheno_loss
-                    )
-
-                metrics["total"] += total_loss.item()
-                metrics["recon"] += recon_loss.item()
-                metrics["pheno"] += pheno_loss.item()
-
-        return (
-            metrics["total"] / num_batches,
-            metrics["recon"] / num_batches,
-            metrics["pheno"] / num_batches,
-        )
-
-    # ==========================================================================
-    # 主训练流程与文件保存 (TFPP 风格)
-    # ==========================================================================
     def train(self):
-        """ConvAE 主训练流程。"""
+        """只用固定 val 掩码和预先指定的选择指标早停，test 不参与模型选择。"""
         if self.model is None:
-            raise ValueError("initialize_model=False 仅准备数据管线，不能训练；请在模型阶段显式初始化模型")
-        self.logger.info("=" * 80)
-        self.logger.info("开始 ConvAE 训练")
-        self.logger.info("=" * 80)
+            raise ValueError("initialize_model=False 仅准备数据管线，不能训练；请显式初始化模型")
         self._log_configuration()
-
-        # 初始化时已固定划分和 scaler；test_loader 始终不参与训练或早停。
-        train_loader, val_loader = self.train_loader, self.val_loader
-
-        # 创建优化器和调度器
+        self.logger.info(f"模型选择固定为 {self.selection_metric}，mask_policy={MASK_POLICY}")
         optimizer, scheduler = self._create_optimizer_and_scheduler()
-
-        best_val_loss = float("inf")
-        best_model_state = None
-        best_epoch = -1
-        patience_counter = 0
-
-        # 用于存储日志的历史列表
-        history = {
-            "epoch": [],
-            "train_total": [],
-            "train_recon": [],
-            "train_pheno": [],
-            "val_total": [],
-            "val_pheno": [],
-            "lr": [],
-        }
-
-        start_time = time.time()
-
+        best_loss, best_epoch, best_state, patience = float("inf"), -1, None, 0
+        keys = ("epoch", "train_total_loss", "train_recon_loss", "train_pheno_loss", "val_total_loss",
+                "val_recon_loss", "val_pheno_loss", "selection_metric", "selection_loss", "lr",
+                "train_recon_targets", "val_recon_targets", "val_empty_recon_batches")
+        history = {key: [] for key in keys}
+        start = time.time()
         for epoch in range(self.epochs):
-            t_total, t_recon, t_pheno = self._train_epoch(
-                train_loader,
-                optimizer,
-            )
-            v_total, v_recon, v_pheno = self._validate_epoch(val_loader)
-
-            # 3. 日志追踪
-            current_lr = optimizer.param_groups[0]["lr"]
-
-            history["epoch"].append(epoch + 1)
-            history["train_total"].append(t_total)
-            history["train_recon"].append(t_recon)
-            history["train_pheno"].append(t_pheno)
-            history["val_total"].append(v_total)
-            history["val_pheno"].append(v_pheno)
-            history["lr"].append(current_lr)
-
+            train = self._train_epoch(self.train_loader, optimizer)
+            val = self._validate_epoch(self.val_loader)
+            selected = val[0] if self.use_pheno_help else val[1]
+            values = (epoch + 1, *train, *val, self.selection_metric, selected,
+                      optimizer.param_groups[0]["lr"], self.last_train_stats["recon_count"],
+                      self.last_val_stats["recon_count"], self.last_val_stats["empty_batches"])
+            for key, value in zip(keys, values):
+                history[key].append(value)
             self.logger.info(
-                f"[{epoch + 1:>3}/{self.epochs}] "
-                f"Train: [rec:{t_recon:.6f} / phe:{t_pheno:.6f}] | "
-                f"Val: [total:{v_total:.6f} / phe:{v_pheno:.6f}] | "
-                f"LR: {current_lr:.2e} {'★' if v_total < best_val_loss else ''}"
+                f"[{epoch + 1}/{self.epochs}] train_total={train[0]:.6f} recon={train[1]:.6f} pheno={train[2]:.6f} | "
+                f"val_total={val[0]:.6f} recon={val[1]:.6f} pheno={val[2]:.6f} | "
+                f"{self.selection_metric}={selected:.6f}, recon_targets={self.last_val_stats['recon_count']}"
             )
-
             scheduler.step()
-
-            # 4. 早停与最优模型选取（Warmup 期间由于不看重表型，不计入早停判断）
-            if v_total < best_val_loss:
-                best_val_loss = v_total
-                best_epoch = epoch + 1
-                best_model_state = {
-                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                }
-                patience_counter = 0
+            if not np.isfinite(selected):
+                raise ValueError("验证选择损失不是有限值，禁止保存或用 NaN 选择 checkpoint")
+            if selected < best_loss:
+                best_loss, best_epoch, patience = selected, epoch + 1, 0
+                best_state = {key: value.detach().cpu().clone() for key, value in self.model.state_dict().items()}
             else:
-                patience_counter += 1
-
-            if patience_counter >= self.config.patience:
-                self.logger.info(f"早停触发: {self.config.patience} 轮无改善")
+                patience += 1
+            if patience >= self.patience:
                 break
+        if best_state is None:
+            raise ValueError("没有有效的验证 checkpoint")
+        self.model.load_state_dict(best_state)
+        self.model.eval()
+        if self.is_save_training_info:
+            self._save_model_info(best_state, best_loss, best_epoch, history)
+        return {"best_epoch": best_epoch, "selection_metric": self.selection_metric,
+                "best_selection_loss": best_loss, "history": history, "training_time": time.time() - start}
 
-        total_time = time.time() - start_time
-        self.logger.info(f"\n训练完成. 耗时 {total_time / 60:.2f} 分钟.")
-        self.logger.info(
-            f"最佳 Epoch: {best_epoch}, 最佳 Val Loss: {best_val_loss:.6f}"
-        )
-
-        # 5. 保存权重、日志及实施特征压缩
-        if self.config.is_save_training_info and best_model_state is not None:
-            self._save_model_info(best_model_state, best_val_loss, best_epoch, history)
-            # 最终潜在特征导出留到后续步骤，本步骤不自动导出。
-
-    def _save_model_info(
-        self, state: dict[str, Any], best_loss: float, best_epoch: int, history: dict
-    ):
-        """
-        TFPP 风格的模型与元数据存储
-        """
-        # 1. 保存模型参数
-        model_path = self.best_model_save_dir / "best_model.pt"
-        torch.save(state, model_path)
-        self.logger.info(f"【模型权重】已保存至: {model_path}")
-
-        # 2. 保存 JSON 摘要
-        summary_info = {
-            "best_epoch": int(best_epoch),
-            "total_epochs": int(self.epochs),
-            "best_val_loss": float(best_loss),
-            "warmup_epochs": int(self.warmup_epochs),
+    def _save_model_info(self, state: dict[str, Any], best_loss: float, best_epoch: int, history: dict):
+        """结构化 checkpoint 明确绑定预处理、固定验证 mask 和预先指定的选择目标。"""
+        index = best_epoch - 1
+        metadata = {
+            "schema_version": 3, "model_version": MODEL_VERSION,
+            "selection_metric": self.selection_metric, "use_pheno_help": self.use_pheno_help,
+            "selection_definition": self.config.selection_definition,
+            "reconstruction_loss_definition": self.config.reconstruction_loss_definition,
+            "phenotype_loss_definition": self.config.phenotype_loss_definition,
+            "recon_weight": self.recon_weight, "pheno_weight": self.pheno_weight,
+            "best_epoch": best_epoch, "best_selection_loss": best_loss,
+            "val_total_loss": history["val_total_loss"][index],
+            "val_recon_loss": history["val_recon_loss"][index],
+            "val_pheno_loss": history["val_pheno_loss"][index],
+            "val_recon_targets": history["val_recon_targets"][index],
+            "val_empty_recon_batches": history["val_empty_recon_batches"][index],
+            "mask_policy": MASK_POLICY, "reconstruction_policy": RECONSTRUCTION_POLICY,
+            "empty_target_policy": EMPTY_TARGET_POLICY,
+            "empty_training_batch_policy": "skip_optimizer_step_if_no_weighted_target",
+            "val_mask_ratio": self.config.val_mask_ratio, "train_mask_ratio": self.config.train_mask_ratio,
+            "validation_masks_sha256": self.validation_masks_sha256,
+            "preprocessing_sha256": file_sha256(Path(self.config.output_dir) / "preprocessing/preprocessing.json"),
         }
-        summary_path = self.training_history_save_dir / "training_summary.json"
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(summary_info, f, ensure_ascii=False, indent=4)
-
-        # 3. 保存 CSV 训练历史曲线
-        df = pd.DataFrame(history)
-        history_path = self.training_history_save_dir / "training_history.csv"
-        df.to_csv(history_path, index=False)
-        self.logger.info(
-            f"【训练历史及摘要】已保存至: {self.training_history_save_dir}"
-        )
+        model_config = self.model.model_config()
+        torch.save({"format_version": 2, "model_config": model_config, "metadata": metadata,
+                    "state_dict": state}, self.best_model_save_dir / "best_model.pt")
+        (self.best_model_save_dir / "model_config.json").write_text(
+            json.dumps(model_config, ensure_ascii=False, indent=2), encoding="utf-8")
+        (self.best_model_save_dir / "checkpoint_metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        (self.training_history_save_dir / "training_summary.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        pd.DataFrame(history).to_csv(self.training_history_save_dir / "training_history.csv", index=False)
 
     def _compress_data(self, best_model_state: dict[str, Any]):
         """
@@ -464,7 +393,7 @@ class ConvAETrainer:
                 X_chunks = X_chunks.to(self.device)
                 with torch.autocast("cuda", enabled=self.is_cuda):
                     # 调用模型本身前向获得压缩特征，此时掩码比率一定为 0
-                    compressed_final_X, _, _, _ = self.model(X_chunks, mask_ratio=0.0)
+                    compressed_final_X, _, _, _ = self.model(X_chunks, mask_ratio=0.0, padding_mask=self.dataset.chunk_padding_mask.to(self.device))
 
                     # 展平特征：[B, Num_Chunks, d_ext] -> [B, Num_Chunks * d_ext]
                     batch_features = compressed_final_X.view(X_chunks.shape[0], -1)
@@ -486,6 +415,8 @@ class ConvAETrainer:
             f"    表型数量: {len(self.phenotype_names)} {self.phenotype_names}"
         )
         self.logger.info(f"    use_pheno_help: {self.use_pheno_help}")
+        self.logger.info(f"    n_phenotypes/n_time_points: {self.config.n_phenotypes}/{self.config.n_time_points}")
+        self.logger.info(f"    selection_metric: {self.selection_metric}")
         self.logger.info(f"    train_ratio: {self.train_ratio}")
         self.logger.info(f"    val_ratio: {self.val_ratio}")
         self.logger.info(f"    test_ratio: {self.test_ratio}")

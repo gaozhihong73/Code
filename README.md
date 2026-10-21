@@ -253,7 +253,8 @@ ConvAE 沿用现有名称，实际为带表型辅助任务的 masked autoencoder
 API 可直接传内存划分：`ConvAETrainer(config, indices=split, initialize_model=False)`；
 此时不要同时设置 `config.split_file`。`get_mae_dataloaders(dataset, split, ...)` 返回
 train/val/test loader、scalers 和 split 的 `MAEDataLoaders`；旧 `get_mae_dataloader()` 仍返回 train/val 两项，
-但改为只用 train 拟合。两者的 batch 均保留 `(chunks, normalized_phenotype)` 格式。
+但改为只用 train 拟合。公共数据接口默认保留 `(chunks, normalized_phenotype)`；trainer 内部
+启用 include_sample_ids=True，使用三项 `(chunks, normalized_phenotype, sample_id)` 固定验证掩码。
 直接访问原始 Dataset 则返回 `(chunks, raw_phenotype)`；旧 `phenotype_norm` 不再存在，
 调用 Dataset 的旧归一化方法会明确报错，应改用固定 split 后的 loader。
 
@@ -261,7 +262,7 @@ train/val/test loader、scalers 和 split 的 `MAEDataLoaders`；旧 `get_mae_da
 `chunk_padding_mask` 为 `[num_chunks, chunk_size]`，`chunk_valid_mask` 为其反值。
 `original_length` 记录原始 SNP 有效长度，`chunk_starts`、`chunk_valid_lengths` 可恢复每块的原始位置。
 `sample_with_metadata(i)` 提供真实缺失 mask、padding mask 和 sample_id：真实缺失类别0仍是有效位置，
-不能把 `SNP == 0` 当作 padding。mask 如何用于模型注意力、池化和重建损失留到第6步。
+不能把 `SNP == 0` 当作 padding。模型现已把这些 mask 用于特征投影、注意力、池化和重建目标。
 
 数据产物保存于 `outputs/convae/<exp_name>/<split或fold标识>_<索引内容哈希>/`：
 
@@ -284,8 +285,59 @@ scalers/scaler.pkl                 # 与 TFPP 同格式，支持 transform 和�
 train_ratio=0.8、val_ratio=0.2、test_ratio=0，test 保持为空。
 输出不再直接写入共享的 outputs/convae 根目录；同目录下不同数据契约/配置会拒绝覆盖，应使用新 exp_name。
 旧本地 ConvAE_Train.py 被仓库忽略；可版本控制的命令入口为 train_convae.py。
-自动潜在特征导出已暂停，后续步骤再实现；当前模型固定14维表型头和 use_pheno_help 行为尚未调整，
-正式训练仍受旧模型限制，本步骤仅验证数据管线。
+自动潜在特征导出仍暂停；ConvAE v2 已支持动态表型维度和真正的辅助任务开关，见下节。
+
+### ConvAE v2 模型、目标和 checkpoint
+
+模型显式接收 `n_phenotypes`、`n_time_points`，表型输出为 `[batch, n_phenotypes, n_time_points]`。
+trainer 根据 phenotype_names 和 CSV 时间列确定维度，并与显式 n_time_points/time_coordinates 校验，
+不再固定输出14；不提供时间坐标时仅使用 CSV 列顺序。单表型14时间点继续受支持。
+`use_pheno_help=false` 不构建/调用表型头，对应参数不进入优化器，表型损失严格为零。
+
+模型选择口径在配置中固定，不允许根据运行结果切换：
+
+- 开启辅助：`val_total_loss = recon_weight * val_recon_loss + pheno_weight * val_pheno_loss`。
+- 关闭辅助：使用 `val_recon_loss`；API 配置必须显式设置 recon_weight=1、pheno_weight=0。
+  CLI 仅在未显式给权重时按开关选择默认值。权重非负、有限且和为1。
+- train/val 共用同一损失函数；重建 CE 除以可用 SNP 目标数，表型 MSE 除以个体×表型×时间点数。
+  epoch 指标按监督元素总数汇总，不能简单平均各 batch 均值。
+- 验证也执行掩码重建，mask 由 seed、完整 split 指纹和 sample_id 独立生成并保存；
+  不随 epoch、batch 顺序或 batch_size 改变。test 个体不能进入验证选择入口。
+
+padding 的 embedding 贡献先清零，完整 padding patch 不作为注意力 key/value，也不参与 mask 抽样或池化；
+全 padding chunk 跳过注意力。最后的部分 patch 自动补内部 padding，保留其有效 SNP。
+池化按可见的有效 SNP 数加权，真实缺失类别0保留可学习 embedding；类别0不提供重建监督。
+重建只监督“选中 patch ∩ 非结构性 padding ∩ 观测类别1/2/3”的 SNP。
+若某行仅有一个有效 patch 且全部被遮挡，解码使用非 SNP 的零上下文，不把 padding 当上下文。
+无可用重建目标时损失与梯度为零；纯重建 batch 没有有效目标时跳过优化器更新，避免 weight decay 改动权重。
+验证也记录可用目标数和无目标 batch 数；无目标时的零值不代表有可用的重建评分信息。
+
+```bash
+# 仅重建，不使用表型辅助；显式启用新的固定验证重建口径
+.venv/bin/python -B train_convae.py --exp_name maize_mae_recon \
+  --split_file outputs/tfpp/EXP/preprocessing/split.npz \
+  --use_pheno_help false --recon_weight 1 --pheno_weight 0
+```
+
+`ConvAE.forward()` 仍返回四项：chunk 表征、三维表型预测（关闭时为 None）、重建 logits、bool patch mask。
+新增 padding_mask、reconstruction_mask、generator 关键字参数；eval 传固定 mask 时也执行解码，
+纯表征推理应显式使用 mask_ratio=0。省略 padding_mask 明确表示所有输入位置有效，不能从类别0推测 padding。
+patch_size、d_model、d_ext、层数、dropout 和 train_mask_ratio/val_mask_ratio 均在配置与 CLI 中记录。
+
+新增产物包括 `preprocessing/validation_masks.npz`、`models/model_config.json`、
+`models/checkpoint_metadata.json`；history 同时记录 train/val total、recon、pheno、选择指标及目标数。
+`best_model.pt` 采用 format_version=2 的结构化包，包含 state_dict、模型配置、最佳验证分项、
+选择定义，以及预处理/固定 mask 的哈希。训练结束恢复最佳权重，不使用最后一轮权重代替。
+
+```python
+from utils.convae_model_loader import load_convae_model
+model, info = load_convae_model("outputs/convae/EXP/SPLIT_TAG", device="cpu")
+```
+
+加载器使用 weights_only=True，校验 schema 3 数据契约、辅助开关、维度、选择口径、mask 和权重形状。
+旧裸 state_dict、固定14维旧实验不会静默迁移：旧归一化/未屏蔽 padding 的语义不能等价恢复，
+请保留旧代码用于诊断或在新 exp_name 下从头训练。第5步数据产物可独立读取，但新模型实验应使用新目录。
+此步不增加 TFPP 连续输入头，也不导出最终潜在特征。
 
 ### 快速开始
 

@@ -6,17 +6,18 @@
 """
 
 from datetime import datetime
+import math
 from typing import Literal
 
 import torch
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 class ConvAEConfig(BaseModel):
-    """ConvAE 数据与训练配置；名称沿用，模型架构在本步骤保持原样。
+    """ConvAE 数据与训练配置；类名沿用，辅助头维度与掩码策略显式记录。
 
     损失函数由 recon_weight (重构损失) 和 pheno_weight (表型辅助损失) 加权组合，
-    两者之和应为 1.0。use_pheno_help 控制是否启用表型辅助压缩分支。
+    两者之和必须为 1.0；关闭辅助时显式使用 recon_weight=1、pheno_weight=0。
     注意: batch_size 必须为 2 的倍数; seed 默认 73。
     """
 
@@ -37,7 +38,7 @@ class ConvAEConfig(BaseModel):
     batch_size: int = Field(default=2, ge=1, multiple_of=2)
     patience: int = 10
     seed: int = 73
-    dropout: float = 0.3
+    dropout: float = Field(default=0.3, ge=0, lt=1, allow_inf_nan=False)
     grad_clip_norm: float = 1.0
     is_save_training_info: bool = True  # 是否保存训练好的模型到本地
     device: str = Field(
@@ -46,8 +47,20 @@ class ConvAEConfig(BaseModel):
     num_workers: int = 8
 
     # 损失权重
-    recon_weight: float = 0.7
-    pheno_weight: float = 0.3
+    recon_weight: float = Field(default=0.7, ge=0, le=1, allow_inf_nan=False)
+    pheno_weight: float = Field(default=0.3, ge=0, le=1, allow_inf_nan=False)
+    train_mask_ratio: float = Field(default=0.5, gt=0, lt=1, allow_inf_nan=False)
+    val_mask_ratio: float = Field(default=0.5, gt=0, lt=1, allow_inf_nan=False)
+
+    # 保留原模型默认规模，可为 CPU 合成冒烟显式缩小。
+    patch_size: int = Field(default=20, ge=1)
+    d_model: int = Field(default=128, ge=1)
+    d_ext: int = Field(default=166, ge=1)
+    num_heads: int = Field(default=4, ge=1)
+    encoder_layers: int = Field(default=4, ge=1)
+    decoder_layers: int = Field(default=2, ge=1)
+    n_phenotypes: int | None = Field(default=None, ge=1)
+    n_time_points: int | None = Field(default=None, ge=1)
 
     # 学习率调度器参数
     use_warmup: bool = True  # 使用warmup
@@ -78,7 +91,43 @@ class ConvAEConfig(BaseModel):
     def _validate_chunks(self):
         if self.overlap >= self.chunk_size:
             raise ValueError("overlap 必须小于 chunk_size")
+        if self.d_model % self.num_heads:
+            raise ValueError("d_model 必须能被 num_heads 整除")
+        if not math.isclose(self.recon_weight + self.pheno_weight, 1, rel_tol=0, abs_tol=1e-8):
+            raise ValueError("recon_weight 与 pheno_weight 之和必须为1")
+        if not self.use_pheno_help and (self.pheno_weight != 0 or self.recon_weight <= 0):
+            raise ValueError("关闭表型辅助时请显式设置 pheno_weight=0、recon_weight=1")
+        if self.n_phenotypes is not None and self.n_phenotypes != len(self.phenotype_names):
+            raise ValueError("n_phenotypes 必须与 phenotype_names 一致")
+        self.n_phenotypes = len(self.phenotype_names)
+        if self.time_coordinates is not None:
+            if not self.time_coordinates or not all(math.isfinite(value) for value in self.time_coordinates):
+                raise ValueError("time_coordinates 必须非空且为有限值")
+            if self.n_time_points is not None and self.n_time_points != len(self.time_coordinates):
+                raise ValueError("n_time_points 必须与 time_coordinates 一致")
+            self.n_time_points = len(self.time_coordinates)
         return self
+
+    @computed_field
+    @property
+    def selection_metric(self) -> str:
+        return "val_total_loss" if self.use_pheno_help else "val_recon_loss"
+
+    @computed_field
+    @property
+    def selection_definition(self) -> str:
+        return ("recon_weight * val_recon_loss + pheno_weight * val_pheno_loss"
+                if self.use_pheno_help else "val_recon_loss")
+
+    @computed_field
+    @property
+    def reconstruction_loss_definition(self) -> str:
+        return "mean_ce_selected_observed_nonpadding_snps_zero_if_empty"
+
+    @computed_field
+    @property
+    def phenotype_loss_definition(self) -> str:
+        return "mean_squared_error_over_batch_phenotypes_times" if self.use_pheno_help else "disabled_zero"
 
     @property
     def output_dir(self) -> str:
