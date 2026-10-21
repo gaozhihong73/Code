@@ -157,11 +157,11 @@ dataset/maize/
 `TrainingDosageImputer.fit(dosage, train_idx=...)` 在指定训练个体上拟合逐位点众数，
 并列选择较小的观测剂量，训练中整列缺失则报错。`metadata_` 记录训练行号、缺失计数、
 填充值和编码版本，可随实验保存为 JSON。缺失可以经显式众数策略填为0，但不会自动当作观测剂量0。
-普通 TFPP 已在固定划分后接入 mode，仅用训练个体拟合筛选填补规则；K折和模拟筛选仍不自动 fit。
+普通 TFPP 与每个 K 折实验均在固定划分后接入 mode，仅用当前 train 个体拟合；模拟筛选仍不自动 fit。
 
 真实管线在筛选前显式解码模型类别；模拟管线使用相同剂量筛选，进入模型时统一转为四类别码，
 `SimTFPPConfig.num_embeddings` 默认改为4。旧三类别模拟 checkpoint 仍依赖旧编码，
-不能与新编码管线混用。普通 TFPP 在划分后筛选；K折与模拟训练暂保持旧流程。
+不能与新编码管线混用。普通/折内 TFPP 均在划分后筛选；模拟训练暂保持旧流程。
 
 `screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练可显式传
 `--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。
@@ -180,7 +180,7 @@ dataset/maize/
 Deep 只接收类别 `0/1/2/3`，保留缺失类别0。Wide 独立恢复剂量，再除以2得到 `0/0.5/1`；
 `--wide_missing_strategy mode`（默认）只用训练个体的逐位点众数填补 Wide 缺失，并将填充值
 保存为 checkpoint buffer；`error` 拒绝 Wide 缺失。不将筛选的填补结果写回 Deep 输入。
-线性注意力、时间预测头和门控未改变；K折与模拟模型显式使用 `legacy_categorical` 兼容路径。
+线性注意力、时间预测头和门控未改变；普通/折内模型统一使用 `dosage_v1`，模拟模型暂保留旧兼容路径。
 
 每次普通训练在实验目录保存：
 
@@ -191,7 +191,7 @@ Deep 只接收类别 `0/1/2/3`，保留缺失类别0。Wide 独立恢复剂量�
 
 `load_tfpp_model()` 和 `load_model_from_checkpoint()` 默认严格校验训练产物，并恢复 Wide
 填补 buffer。测试集推理复用保存的 test_idx 和原始列索引，不再通过 seed 重建或读取表型筛选。
-K折的全量监督筛选泄漏尚未修复；其旧产物仅允许显式 legacy 兼容。
+K折每折独立保存相同 schema 3 产物，可直接把 fold 目录传给新推理；旧 K 折产物仅允许显式 legacy 兼容。
 
 ### 共享个体划分
 
@@ -352,7 +352,52 @@ outputs/tfpp/{exp_name}/
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--use_kfold` | 是否启用 K 折交叉验证 | false |
-| `--n_folds` | 折数 | 10 |
+| `--n_folds` | 外层折数，至少2 | 10 |
+| `--kfold_val_ratio` | 外层 train 内再分给早停 val 的比例 | 0.1 |
+
+外层使用 `KFold(shuffle=True, random_state=seed)`，每个个体恰好进入 test 一次。
+内层在剩余个体中按 `kfold_val_ratio` 划出 val，随机种子为 `seed + fold - 1`。
+例如2折、400个体、默认比例时，每折约180个 train、20个 val、200个 test。
+普通模式的 train/val/test_ratio 不控制此划分；单次 `split_file` 不能用于外层 K 折。
+
+每折先固定三组原始行号，仅训练行拟合 GWAS/DC-SIS、筛选众数、Wide 众数和表型 scaler；
+原始列索引应用于三组类别 SNP 后，按该折真实维度初始化全新 TFPP、优化器和调度器。
+只用 val 早停和选模型，恢复最佳权重后仅评估 test 一次，预测导出复用该次前向结果。
+模型初始化种子为 `seed + fold`（fold 从1开始），前一折训练轮数不影响下一折初态。
+多表型联合/逐表型并集及 screen_k/gwas_k 仍按显式配置执行；缓存包含 fold 编号和训练行/内容指纹。
+
+```bash
+.venv/bin/python -B train.py --exp_name maize_cv --use_kfold true --n_folds 2 \
+  --kfold_val_ratio 0.1 --screen_missing_strategy mode --num_workers 0
+
+.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_cv/folds/fold_01 \
+  --snp_file dataset/maize/snp/snp_50000.npy --device cpu
+```
+
+产物布局（K折始终保存每折可复现产物，即使传入 `--is_save false`）：
+
+```text
+outputs/tfpp/maize_cv/
+├── folds/fold_01/            # fold_02、fold_03... 同结构
+│   ├── preprocessing/       # schema 3 JSON、split.npz、screened_indices.npy
+│   ├── scalers/scaler.pkl
+│   ├── models/              # best_model.pt（含 Wide buffer）、model_config.json
+│   ├── training_history/
+│   ├── config.json
+│   ├── metrics.json
+│   ├── test_predictions.npz # 归一化/原尺度预测及标签、sample_id、sample_idx、fold
+│   └── test_predictions.csv
+└── training_history/
+    ├── kfold_summary.json   # 各折明细、总体及每表型指标均值/标准差
+    ├── kfold_fold_details.csv
+    ├── kfold_overall_stats.csv
+    ├── kfold_phenotype_stats.csv
+    └── kfold_predictions.csv # 按原始 sample_idx 排序，携带 sample_id、fold、phenotype
+```
+
+标准差使用 `ddof=0`，保留每折 PCC，不能以混合全部预测的单个 PCC 替代折间统计。
+当前 sample_id 明确为稳定行索引，不代表已有生物学 ID。每折目录可独立通过严格推理哈希校验；
+已有折 split 与新配置冲突时拒绝覆盖，应使用新实验目录。
 
 > **Note:** 布尔参数 (`--is_save`, `--use_warmup`, `--use_kfold`) 接受 `true`/`false` 字符串。
 

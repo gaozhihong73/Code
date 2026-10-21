@@ -22,6 +22,7 @@ from utils.Split import (
     load_or_create_split,
     load_split,
     save_split,
+    split_from_indices,
     validate_split_indices,
 )
 
@@ -42,6 +43,18 @@ class ToyDataset(Dataset):
 
 
 class SplitTests(unittest.TestCase):
+    def test_explicit_indices_keep_original_order_and_identity(self):
+        split = split_from_indices([3, 0], [2], [1], 4, sample_ids=["A", "B", "C", "D"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_split(split, Path(directory) / "explicit.npz")
+            restored = load_split(path, sample_ids=["A", "B", "C", "D"])
+        np.testing.assert_array_equal(restored.train_idx, [3, 0])
+        np.testing.assert_array_equal(restored.test_idx, [1])
+        self.assertEqual(restored.metadata["sample_id_source"], "provided")
+        self.assertEqual(restored.metadata["generator"], "explicit_individual_indices_v1")
+        with self.assertRaises(ValueError):
+            split_from_indices([0, 0], [1], [2], 4)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -273,7 +273,7 @@ def get_dataloader(
     使用 ``random_split`` 对数据集索引进行互斥划分，对表型数据
     执行归一化（仅用训练集拟合 scaler），最终构建三组 DataLoader。
 
-    注意: SNP 特征筛选由上层 Trainer 在数据划分前统一执行，本函数不再负责筛选。
+    注意: 上层 Trainer 先确定本折索引，仅用 train 行筛选后传入同列 SNP；本函数不筛选。
 
     Parameters
     ----------

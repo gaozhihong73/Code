@@ -56,8 +56,13 @@ def load_inference_artifacts(exp_dir: str | Path, config: dict) -> InferenceArti
     missing = required - meta.keys()
     if missing:
         raise ValueError(f"预处理元数据缺少字段: {sorted(missing)}")
-    if meta["schema_version"] not in (2, 3) or meta["training_mode"] != "regular":
-        raise ValueError("只支持完整的普通训练预处理产物 schema 2/3")
+    if meta["schema_version"] not in (2, 3) or meta["training_mode"] not in ("regular", "kfold"):
+        raise ValueError("只支持完整的普通/折内预处理产物 schema 2/3")
+    if meta["training_mode"] == "kfold":
+        fold = meta.get("fold_index")
+        if (meta["schema_version"] != 3 or not isinstance(fold, int) or fold < 1
+                or config.get("fold_index") != fold):
+            raise ValueError("折内预处理编号或版本与模型配置不一致")
     if meta["screening_dosage_encoding_version"] != GENOTYPE_ENCODING_VERSION:
         raise ValueError("基因型预处理版本不兼容，不能猜测编码")
     if meta["wide_input_mode"] != "dosage_v1":
@@ -68,6 +73,13 @@ def load_inference_artifacts(exp_dir: str | Path, config: dict) -> InferenceArti
     if hashes["split"] != meta["split_sha256"]:
         raise ValueError("split 文件哈希与训练记录不一致")
     split = load_split(paths["split"])
+    if meta["training_mode"] == "kfold" and split.metadata.get("fold_index") != meta["fold_index"]:
+        raise ValueError("split 中的 fold_index 与训练记录不一致")
+    if meta["training_mode"] == "kfold":
+        if (config.get("n_folds") != split.metadata.get("n_folds")
+                or config.get("kfold_val_ratio") != split.metadata.get("kfold_val_ratio")
+                or meta.get("model_initialization_seed") != config.get("seed")):
+            raise ValueError("折数、折内验证比例或模型初始化 seed 与保存的记录不一致")
     if (split.metadata["sample_ids_sha256"] != meta["sample_ids_sha256"]
             or training_indices_hash(split.train_idx) != meta["train_indices_sha256"]):
         raise ValueError("split 个体顺序或训练索引哈希不一致")

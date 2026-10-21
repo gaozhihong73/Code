@@ -14,7 +14,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR
 from torch.utils.data import DataLoader
 
 from config import TFPPConfig
-from dataloader import TFPPDataset, get_dataloader, get_dataloader_with_kfold
+from dataloader import TFPPDataset, get_dataloader
 from model import TFPP
 from trainer._scheduler import WarmupSequentialLR
 from utils import (
@@ -39,7 +39,10 @@ from utils.Screening import (
     array_fingerprint,
     training_indices_hash,
 )
-from utils.Split import default_split_path, load_or_create_split
+from utils.Split import (
+    IndividualSplit, default_split_path, load_or_create_split, load_split, save_split,
+    split_from_indices,
+)
 
 
 class TFPPTrainer:
@@ -100,7 +103,7 @@ class TFPPTrainer:
         self.log_file = self.config.log_file
         self.logger = Logger(self.log_file, unique=False)
 
-        # 普通训练先划分再筛选；K折暂保留旧路径。
+        # 普通训练和每个折实验均先划分再筛选；外层协调器不筛选或初始化模型。
         self.screen_k = config.screen_k
         self.gwas_k = config.gwas_k
         self.screen_multivariate = config.screen_multivariate
@@ -156,43 +159,15 @@ class TFPPTrainer:
         self.ablation_mode = config.ablation_mode
         self.time_coordinates = config.time_coordinates
 
-        # 先固定输入维度和训练期预处理，再初始化模型。
+        # 外层协调器保留原始矩阵；所有拟合及模型创建由独立折实验执行。
         if self.use_kfold:
-            self._screen_legacy_kfold()
+            if self.n_folds > self.num_sample:
+                raise ValueError("n_folds 不能超过个体数")
+            self.snp_dim = self.original_snp_dim
+            self.model = None
         else:
             self._prepare_regular_data()
-        self.model = self._create_model()
-
-    def _screen_legacy_kfold(self):
-        """仅隔离旧K折逻辑：全体表型筛选泄漏尚未在本步修复。"""
-        if self.screen_k > 0 or self.gwas_k > 0:
-            from utils import compute_cache_key, screen_snps
-
-            cache_key = compute_cache_key(
-                self.snp_file,
-                self.pheno_dir,
-                self.phenotype_names,
-                self.screen_k,
-                self.gwas_k,
-                self.seed,
-                multivariate=self.screen_multivariate,
-                missing_strategy=self.screen_missing_strategy,
-            )
-            indices = screen_snps(
-                prepare_screening_dosage(
-                    model_codes_to_dosage(self.dataset.snp),
-                    missing_strategy=self.screen_missing_strategy,
-                ),
-                self.dataset.phenotype,
-                screen_k=self.screen_k,
-                gwas_k=self.gwas_k,
-                multivariate=self.screen_multivariate,
-                cache_key=cache_key,
-                logger=self.logger,
-            )
-            if indices is not None:
-                self.dataset.snp = self.dataset.snp[:, indices]
-        self.snp_dim = self.dataset.snp.shape[1]
+            self.model = self._create_model()
 
     def _prepare_regular_data(self):
         """所有依赖标签的拟合只接收固定 train_idx，模型输入始终保留缺失类别0。"""
@@ -226,7 +201,9 @@ class TFPPTrainer:
             self.screen_k,
             self.gwas_k,
             self.seed,
-            split_info="regular:" + self.split.metadata["sample_ids_sha256"],
+            split_info=("regular" if self.config.fold_index is None
+                        else f"kfold:fold_{self.config.fold_index:02d}")
+            + ":" + self.split.metadata["sample_ids_sha256"],
             multivariate=self.screen_multivariate,
             missing_strategy=self.screen_missing_strategy,
             train_indices=train_idx,
@@ -306,7 +283,9 @@ class TFPPTrainer:
         np.save(artifacts / "screened_indices.npy", self.screened_indices)
         self.preprocessing_metadata = {
             "schema_version": 3,
-            "training_mode": "regular",
+            "training_mode": "regular" if self.config.fold_index is None else "kfold",
+            "fold_index": self.config.fold_index,
+            "model_initialization_seed": self.seed,
             "split_source": str(Path(split_path).resolve()),
             "split_copy": "split.npz",
             "split_sha256": split_sha256,
@@ -373,7 +352,7 @@ class TFPPTrainer:
             dropout=self.dropout,
             degree=self.degree,
             ablation_mode=self.ablation_mode,
-            wide_input_mode="legacy_categorical" if self.use_kfold else "dosage_v1",
+            wide_input_mode="dosage_v1",
             wide_fill_values=self.wide_fill_values,
         ).to(self.device)
 
@@ -635,6 +614,13 @@ class TFPPTrainer:
         denorm_phenotype_metrics_avg = calculate_metrics_by_average(
             denorm_pheno_metrics
         )
+
+        self.test_predictions = {
+            "predictions_normalized": all_preds.numpy(),
+            "targets_normalized": all_targets.numpy(),
+            "predictions": all_preds_denorm.numpy(),
+            "targets": all_targets_denorm.numpy(),
+        }
 
         return {
             "normalized": {
@@ -1046,451 +1032,159 @@ class TFPPTrainer:
             df_metric.to_csv(metric_file, index=False)
             self.logger.info(f"【各表型 {metric.upper()} 历史】已保存至: {metric_file}")
 
-    def _train_single_fold(
-        self,
-        fold_idx: int,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        test_loader: DataLoader,
-        scalers: dict,
-    ) -> dict[str, Any]:
-        """训练单个折。
-
-        Parameters
-        ----------
-        fold_idx : int
-            当前折的索引。
-        train_loader : DataLoader
-            训练数据加载器。
-        val_loader : DataLoader
-            验证数据加载器。
-        test_loader : DataLoader
-            测试数据加载器。
-        scalers : dict
-            归一化器字典。
-
-        Returns
-        -------
-        dict[str, Any]
-            该折的训练结果字典。
-        """
-        self.logger.info(f"{'=' * 60}")
-        self.logger.info(f"开始训练第 {fold_idx + 1}/{self.n_folds} 折")
-        self.logger.info(f"{'=' * 60}")
-
-        # 重新初始化模型（每折使用新模型）
-        self.model = self._create_model()
-
-        # 创建优化器和调度器
-        optimizer, scheduler = self._create_optimizer_and_scheduler()
-        criterion = self._create_loss()
-
-        # 训练状态跟踪
-        best_val_loss = float("inf")
-        best_val_metrics = {}
-        best_pheno_metrics = {}
-        best_model_state = {
-            k: v.cpu().clone() for k, v in self.model.state_dict().items()
-        }
-        patience_counter = 0
-        best_epoch = -1
-
-        # 训练历史记录
-        train_loss_history = []
-        val_loss_history = []
-        train_metrics_history = []
-        val_metrics_history = []
-
-        # 训练循环
-        for epoch in range(self.epochs):
-            # 训练一个epoch
-            avg_train_loss, train_metrics = self._train_epoch(
-                train_loader, optimizer, criterion
+    def _kfold_splits(self) -> list[IndividualSplit]:
+        """外层 KFold 的 test 只评分；outer train 内独立划出早停 val。"""
+        kfold = KFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
+        splits = []
+        for fold, (outer_train, test_idx) in enumerate(kfold.split(np.arange(self.num_sample)), 1):
+            try:
+                train_idx, val_idx = train_test_split(
+                    outer_train, test_size=self.config.kfold_val_ratio,
+                    random_state=self.seed + fold - 1,
+                )
+            except ValueError as error:
+                raise ValueError("折内 train/val 无法划分，请增加样本或调整 kfold_val_ratio") from error
+            split = split_from_indices(train_idx, val_idx, test_idx, self.num_sample, seed=self.seed)
+            if min(len(split.train_idx), len(split.val_idx), len(split.test_idx)) == 0:
+                raise ValueError("每折 train/val/test 均须非空")
+            split.metadata.update(
+                generator="sklearn_kfold_inner_shuffle_split_v1", fold_index=fold,
+                n_folds=self.n_folds, kfold_val_ratio=self.config.kfold_val_ratio,
+                validation_seed=self.seed + fold - 1,
             )
+            splits.append(split)
+        tests = np.concatenate([split.test_idx for split in splits])
+        if not np.array_equal(np.sort(tests), np.arange(self.num_sample)):
+            raise ValueError("外层测试个体必须恰好覆盖每个样本一次")
+        return splits
 
-            # 验证一个epoch
-            avg_val_loss, val_pheno_metrics, val_metrics = self._validate_epoch(
-                val_loader, criterion
-            )
-
-            # 记录损失历史
-            train_loss_history.append(avg_train_loss)
-            val_loss_history.append(avg_val_loss)
-            train_metrics_history.append(train_metrics)
-            val_metrics_history.append(val_metrics)
-
-            # 日志输出
-            current_lr = optimizer.param_groups[0]["lr"]
-
-            self.logger.info(
-                f"[{epoch + 1:>3}/{self.epochs}] "
-                f"Loss[train:{avg_train_loss:.6f} / val:{avg_val_loss:.6f}] | "
-                f"PCC[train:{train_metrics['pcc']:.6f} / val:{val_metrics['pcc']:.6f}] | "
-                f"R²[train:{train_metrics['r2']:.6f} / val:{val_metrics['r2']:.6f}] | "
-                f"lr: {current_lr:.2e}"
-                f"{' ★' if avg_val_loss < best_val_loss else ''}"
-            )
-
-            # 学习率调度
-            scheduler.step()
-
-            # 更新最佳指标
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_val_metrics = val_metrics
-                best_epoch = epoch + 1
-                patience_counter = 0
-                best_pheno_metrics = val_pheno_metrics
-                best_model_state = {
-                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                }
-            else:
-                patience_counter += 1
-
-            # 早停检查
-            if patience_counter >= self.patience:
-                self.logger.info(f"连续 {self.patience} 轮无改善，触发早停！")
-                break
-
-        # 输出该折训练结果摘要
-        self.logger.info(f"第 {fold_idx + 1} 折训练完成摘要:")
-        self.logger.info(f"    best_epoch: {best_epoch}/{self.epochs}")
-        self.logger.info(f"    best_val_loss: {best_val_loss:.6f}")
-        self.logger.info(f"    best_val_mse: {best_val_metrics['mse']:.6f}")
-        self.logger.info(f"    best_val_rmse: {best_val_metrics['rmse']:.6f}")
-        self.logger.info(f"    best_val_pcc: {best_val_metrics['pcc']:.6f}")
-        self.logger.info(f"    best_val_r²: {best_val_metrics['r2']:.6f}\n")
-
-        self.logger.info(
-            f"{'=' * 14} 开始测试第 {fold_idx + 1}/{self.n_folds} 折 {'=' * 14}"
+    def _prepare_fold(self, fold_index: int, split: IndividualSplit) -> "TFPPTrainer":
+        """实例化独立 TFPPTrainer，复用普通训练的预处理、双视图和模型创建顺序。"""
+        if (not 1 <= fold_index <= self.n_folds
+                or split.metadata.get("fold_index") != fold_index):
+            raise ValueError("fold_index 必须与本折 split 一致且在外层折数范围内")
+        options = self.config.model_dump()
+        options.update(
+            exp_name=f"{self.exp_name}/folds/fold_{fold_index:02d}",
+            use_kfold=False, fold_index=fold_index, split_file=None,
+            seed=self.seed + fold_index, is_save_training_info=True,
         )
+        config = type(self.config).model_validate(options)
+        split_path = Path(config.preprocessing_save_dir) / "split.npz"
+        if split_path.exists():
+            old = load_split(split_path, n_samples=self.num_sample)
+            if (any(not np.array_equal(getattr(old, key), getattr(split, key))
+                    for key in ("train_idx", "val_idx", "test_idx"))
+                    or any(old.metadata.get(key) != split.metadata.get(key) for key in
+                           ("fold_index", "n_folds", "kfold_val_ratio", "seed", "validation_seed"))):
+                raise ValueError(f"已有折划分与当前配置不一致，请使用新实验目录: {split_path}")
+        else:
+            save_split(split, split_path)
+        config = config.model_copy(update={"split_file": str(split_path)})
+        # 每折独立初始化；上一折的训练轮数不会影响下一折的随机初态。
+        torch.manual_seed(config.seed)
+        return TFPPTrainer(config)
 
-        # 重要：这里的 val_loader 实际上是该折的测试集
-        # 使用反归一化后的数据进行最终评估
-        test_results = self._evaluate_test_set(test_loader, scalers)
-
-        # 输出测试集结果
-        self.logger.info("归一化数据的测试集整体指标:")
-        for metric, value in test_results["normalized"]["overall"].items():
-            self.logger.info(f"    {metric.upper():>5}: {value:.6f}")
-        print()
-
-        self.logger.info("反归一化数据的测试集整体指标:")
-        for metric, value in test_results["denormalized"]["overall"].items():
-            self.logger.info(f"    {metric.upper():>5}: {value:.6f}")
-        print()
-
-        self.logger.info("归一化各表型测试集指标:")
-        for pheno_name in self.phenotype_names:
-            metrics = test_results["normalized"]["phenotypes"][pheno_name]
-            self.logger.info(
-                f"    {pheno_name:>5}: "
-                f"RMSE={metrics['rmse']:.6f}, "
-                f"MAE={metrics['mae']:.6f}, "
-                f"PCC={metrics['pcc']:.6f}, "
-                f"R²={metrics['r2']:.6f}"
-            )
-        print()
-
-        self.logger.info("反归一化各表型测试集指标:")
-        for pheno_name in self.phenotype_names:
-            metrics = test_results["denormalized"]["phenotypes"][pheno_name]
-            self.logger.info(
-                f"    {pheno_name:>5}: "
-                f"RMSE={metrics['rmse']:.6f}, "
-                f"MAE={metrics['mae']:.6f}, "
-                f"PCC={metrics['pcc']:.6f}, "
-                f"R²={metrics['r2']:.6f}"
-            )
-        print()
-
-        return {
-            "best_val_loss": best_val_loss,
-            "best_val_metrics": best_val_metrics,
-            "best_epoch": best_epoch,
-            "best_model_state": best_model_state,
-            "best_pheno_metrics": best_pheno_metrics,
-            "train_loss_history": train_loss_history,
-            "val_loss_history": val_loss_history,
-            "train_metrics_history": train_metrics_history,
-            "val_metrics_history": val_metrics_history,
-            "test_results": test_results,  # 包含反归一化后的评估结果
-        }
+    def _save_fold_predictions(self) -> pd.DataFrame:
+        """保存最终测试的同一遍输出，携带原始 sample_id 与折号。"""
+        test_idx = self.split.test_idx
+        sample_ids = np.asarray(self.split.metadata["sample_ids"])[test_idx]
+        fold = self.config.fold_index
+        directory = Path(self.config.output_dir)
+        np.savez_compressed(
+            directory / "test_predictions.npz", sample_idx=test_idx, sample_id=sample_ids,
+            fold=np.full(len(test_idx), fold, dtype=np.int64),
+            phenotype_names=np.asarray(self.phenotype_names),
+            time_coordinates=np.asarray(self.time_coordinates), **self.test_predictions,
+        )
+        rows = []
+        for i, idx in enumerate(test_idx):
+            for p, name in enumerate(self.phenotype_names):
+                row = {"sample_idx": int(idx), "sample_id": sample_ids[i],
+                       "fold": fold, "phenotype": name}
+                for t in range(len(self.time_coordinates)):
+                    row[f"T{t + 1}_Pred"] = self.test_predictions["predictions"][i, p, t]
+                    row[f"T{t + 1}_True"] = self.test_predictions["targets"][i, p, t]
+                rows.append(row)
+        frame = pd.DataFrame(rows)
+        frame.to_csv(directory / "test_predictions.csv", index=False)
+        return frame
 
     def _train_with_kfold(self) -> dict[str, Any]:
-        """
-        使用K折交叉验证评估模型性能
-
-        流程说明：
-        1. 将所有数据分成K折
-        2. 每折训练一个独立模型
-        3. 每折的验证集在训练时用于早停，训练后作为测试集评估
-        4. 汇总K折结果，报告反归一化指标的 Mean ± Std
-
-        注意：
-        - 这里的"验证集"既用于训练中的模型选择，也用于最终评估
-        - 由于每折训练独立模型，不存在信息泄露问题
-        - 最终指标全部基于反归一化后的数据
-
-        Returns
-        -------
-        dict[str, Any]
-            K折交叉验证的统计结果字典。
-        """
+        """逐折运行完整独立训练；汇总折指标分布，不用混合 PCC 替代各折表现。"""
         self._log_configuration()
-
-        # 获取所有样本索引
-        indices = np.arange(self.num_sample)
-
-        # 创建K折分割器
-        kfold = KFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
-
-        # 存储每折的结果
-        fold_results = []
-
-        # 存储所有折的反归一化指标
-        all_fold_denorm_metrics = {
-            "mse": [],
-            "rmse": [],
-            "mae": [],
-            "pcc": [],
-            "r2": [],
+        if not self.is_save_training_info:
+            self.logger.info("K折要求可复现产物，每折仍保存 checkpoint、预处理和预测。")
+        splits = self._kfold_splits()
+        fold_results, prediction_frames = [], []
+        all_metrics = {key: [] for key in ("mse", "rmse", "mae", "pcc", "r2")}
+        pheno_metrics = {name: {key: [] for key in all_metrics} for name in self.phenotype_names}
+        start = time.time()
+        for fold, split in enumerate(splits, 1):
+            self.logger.info(f"Fold {fold}/{self.n_folds}: Train={len(split.train_idx)}, "
+                             f"Val={len(split.val_idx)}, Test={len(split.test_idx)}")
+            trainer = self._prepare_fold(fold, split)
+            try:
+                result = trainer.train()  # 只用 val 选模型，恢复最佳权重后最终评估 test 一次。
+                frame = trainer._save_fold_predictions()
+                prediction_frames.append(frame)
+                result.update(fold=fold, fold_dir=trainer.config.output_dir,
+                              train_indices_sha256=trainer.train_indices_sha256,
+                              screening_cache_key=trainer.screening_cache_key,
+                              snp_dim=trainer.snp_dim)
+                (Path(trainer.config.output_dir) / "metrics.json").write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8",
+                )
+                (Path(trainer.config.output_dir) / "config.json").write_text(
+                    trainer.config.model_dump_json(indent=2), encoding="utf-8",
+                )
+                fold_results.append(result)
+                for key in all_metrics:
+                    all_metrics[key].append(result["test_results"]["denormalized"]["overall"][key])
+                    for name in pheno_metrics:
+                        pheno_metrics[name][key].append(
+                            result["test_results"]["denormalized"]["phenotypes"][name][key])
+            finally:
+                for handler in list(trainer.logger.logger.handlers):
+                    handler.close()
+                    trainer.logger.logger.removeHandler(handler)
+                del trainer
+        def stats(metrics):
+            return {key: {"mean": float(np.mean(values)), "std": float(np.std(values)),
+                          "values": values} for key, values in metrics.items()}
+        summary = {
+            "n_folds": self.n_folds, "outer_seed": self.seed,
+            "kfold_val_ratio": self.config.kfold_val_ratio,
+            "fold_results": fold_results, "overall_denorm_metrics": all_metrics,
+            "phenotype_denorm_metrics": pheno_metrics,
+            "overall_statistics": stats(all_metrics),
+            "phenotype_statistics": {name: stats(values) for name, values in pheno_metrics.items()},
+            "std_ddof": 0, "total_time": time.time() - start,
         }
-        # 存储每个表型在所有折上的反归一化指标
-        phenotype_fold_metrics = {
-            pheno: {"mse": [], "rmse": [], "mae": [], "pcc": [], "r2": []}
-            for pheno in self.phenotype_names
-        }
-        total_start_time = time.time()
-
-        # K折交叉验证循环
-        # 注意：sklearn 的 split 返回的是 (train_index, test_index)
-        # 我们将第二个返回值重命名为 test_indices，作为最终评估用的【测试集】
-        for fold_idx, (train_val_indices, test_indices) in enumerate(
-            kfold.split(indices)
-        ):
-            # ======================================================
-            # 核心修改：二次划分 (从 K-1 折数据中分出验证集)
-            # ======================================================
-            # 从 train_total_indices 中划分出 10% 作为验证集 (用于 Early Stopping)
-            val_relative_ratio = 1.0 / (self.n_folds - 1)
-            train_indices, val_indices = train_test_split(
-                train_val_indices, test_size=val_relative_ratio, random_state=self.seed
-            )
-            self.logger.info(
-                f"Fold {fold_idx + 1}/{self.n_folds}: "
-                f"Train={len(train_indices)}, Val={len(val_indices)}, Test={len(test_indices)}"
-            )
-            # ======================================================
-            # 获取 DataLoader (需要修改该函数以接收三个索引列表)
-            # ======================================================
-            train_loader, val_loader, test_loader, scalers = get_dataloader_with_kfold(
-                train_indices=list(train_indices),
-                val_indices=list(val_indices),
-                test_indices=list(test_indices),
-                norm_method=self.norm_method,
-                scaler_type=self.scaler_type,
-                dataset=self.dataset,
-                batch_size=self.batch_size,
-                device=self.device,
-            )
-            # 保存表型的归一化器，用于在预测的时候进行反归一化
-            phenotype_scaler_save_path = (
-                self.scaler_save_dir / f"scaler_fold_{fold_idx + 1}.pkl"
-            )
-            save_scalers(scalers, phenotype_scaler_save_path)
-            self.logger.info(f"表型归一化器已保存至: {phenotype_scaler_save_path}")
-
-            # 训练当前折
-            fold_result = self._train_single_fold(
-                fold_idx, train_loader, val_loader, test_loader, scalers
-            )
-            fold_results.append(fold_result)
-
-            # 收集反归一化后的指标
-            denorm_overall = fold_result["test_results"]["denormalized"]["overall"]
-            all_fold_denorm_metrics["mse"].append(denorm_overall["mse"])
-            all_fold_denorm_metrics["rmse"].append(denorm_overall["rmse"])
-            all_fold_denorm_metrics["mae"].append(denorm_overall["mae"])
-            all_fold_denorm_metrics["pcc"].append(denorm_overall["pcc"])
-            all_fold_denorm_metrics["r2"].append(denorm_overall["r2"])
-
-            # 收集每个表型的反归一化指标
-            denorm_phenotypes = fold_result["test_results"]["denormalized"][
-                "phenotypes"
-            ]
-            for pheno_name in self.phenotype_names:
-                phenotype_fold_metrics[pheno_name]["mse"].append(
-                    denorm_phenotypes[pheno_name]["mse"]
-                )
-                phenotype_fold_metrics[pheno_name]["rmse"].append(
-                    denorm_phenotypes[pheno_name]["rmse"]
-                )
-                phenotype_fold_metrics[pheno_name]["mae"].append(
-                    denorm_phenotypes[pheno_name]["mae"]
-                )
-                phenotype_fold_metrics[pheno_name]["pcc"].append(
-                    denorm_phenotypes[pheno_name]["pcc"]
-                )
-                phenotype_fold_metrics[pheno_name]["r2"].append(
-                    denorm_phenotypes[pheno_name]["r2"]
-                )
-
-        total_time = time.time() - total_start_time
-
-        # ========== 输出K折交叉验证总结 ==========
-        self.logger.info("=" * 60)
-        self.logger.info(f"{self.n_folds}折交叉验证完成!")
-        self.logger.info("=" * 60)
-        self.logger.info(f"总耗时: {total_time / 60:.2f} 分钟")
-        self.logger.info(f"平均每折耗时: {total_time / self.n_folds / 60:.2f} 分钟")
-        print()
-
-        # 计算并输出整体反归一化指标的统计
-        self.logger.info("整体反归一化指标统计 (Mean ± Std):")
-        for metric_name, values in all_fold_denorm_metrics.items():
-            mean_val = np.mean(values)
-            std_val = np.std(values)
-            self.logger.info(
-                f"    {metric_name.upper():>5}: {mean_val:.6f} ± {std_val:.6f}"
-            )
-        print()
-
-        # 输出每个表型的反归一化指标统计
-        self.logger.info("各表型反归一化指标统计 (Mean ± Std):")
-        for pheno_name in self.phenotype_names:
-            self.logger.info(f"  {pheno_name:>5}:")
-            for metric_name, values in phenotype_fold_metrics[pheno_name].items():
-                mean_val = np.mean(values)
-                std_val = np.std(values)
-                self.logger.info(
-                    f"      {metric_name.upper():>5}: {mean_val:.6f} ± {std_val:.6f}"
-                )
-        print()
-
-        # 保存K折统计结果
-        if self.is_save_training_info:
-            self._save_kfold_results(
-                fold_results,
-                all_fold_denorm_metrics,
-                phenotype_fold_metrics,
-                total_time,
-            )
-
-        return {
-            "fold_results": fold_results,
-            "overall_denorm_metrics": all_fold_denorm_metrics,
-            "phenotype_denorm_metrics": phenotype_fold_metrics,
-            "total_time": total_time,
-        }
-
-    def _save_kfold_results(
-        self,
-        fold_results: list,
-        overall_metrics: dict,
-        phenotype_metrics: dict,
-        total_time: float,
-    ):
-        """保存 K 折交叉验证结果。
-
-        Parameters
-        ----------
-        fold_results : list
-            每折的详细结果列表。
-        overall_metrics : dict
-            整体反归一化指标。
-        phenotype_metrics : dict
-            各表型反归一化指标。
-        total_time : float
-            总训练时间（秒）。
-        """
-        # 保存整体指标统计
-        overall_stats = pd.DataFrame(
-            {
-                "Metric": list(overall_metrics.keys()),
-                "Mean": [np.mean(v) for v in overall_metrics.values()],
-                "Std": [np.std(v) for v in overall_metrics.values()],
-                "Min": [np.min(v) for v in overall_metrics.values()],
-                "Max": [np.max(v) for v in overall_metrics.values()],
-            }
+        directory = self.training_history_save_dir
+        (directory / "kfold_summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",
         )
-        overall_stats_path = self.training_history_save_dir / "kfold_overall_stats.csv"
-        overall_stats.to_csv(overall_stats_path, index=False)
-        self.logger.info(f"整体K折统计已保存: {overall_stats_path}\n")
-
-        # 保存各表型指标统计
-        phenotype_stats_list = []
-        for pheno_name in self.phenotype_names:
-            for metric_name, values in phenotype_metrics[pheno_name].items():
-                phenotype_stats_list.append(
-                    {
-                        "Phenotype": pheno_name,
-                        "Metric": metric_name.upper(),
-                        "Mean": np.mean(values),
-                        "Std": np.std(values),
-                        "Min": np.min(values),
-                        "Max": np.max(values),
-                    }
-                )
-        phenotype_stats = pd.DataFrame(phenotype_stats_list)
-        phenotype_stats_path = (
-            self.training_history_save_dir / "kfold_phenotype_stats.csv"
-        )
-        phenotype_stats.to_csv(phenotype_stats_path, index=False)
-        self.logger.info(f"各表型K折统计已保存: {phenotype_stats_path}\n")
-
-        # 保存每折的详细结果和模型
-        save_model_config(self.config, self.best_model_save_dir)
-        fold_details = []
-        for i, result in enumerate(fold_results):
-            denorm_overall = result["test_results"]["denormalized"]["overall"]
-            fold_details.append(
-                {
-                    "Fold": i + 1,
-                    "Best_Epoch": result["best_epoch"],
-                    "Val_Loss": result["best_val_loss"],
-                    "Val_MSE": denorm_overall["mse"],
-                    "Val_RMSE": denorm_overall["rmse"],
-                    "Val_MAE": denorm_overall["mae"],
-                    "Val_PCC": denorm_overall["pcc"],
-                    "Val_R2": denorm_overall["r2"],
-                }
-            )
-            # 获取最优模型
-            best_model_state = result["best_model_state"]
-            # 最优模型保存路径
-            model_path = self.best_model_save_dir / f"tfpp_best_model_kfold_{i + 1}.pt"
-            torch.save(best_model_state, model_path)
-        self.logger.info(f"每折最优模型结果已保存:{self.best_model_save_dir}\n")
-        fold_details_df = pd.DataFrame(fold_details)
-        fold_details_path = self.training_history_save_dir / "kfold_fold_details.csv"
-        fold_details_df.to_csv(fold_details_path, index=False)
-        self.logger.info(f"每折详细结果已保存: {fold_details_path}\n")
-
-        # 保存K折摘要信息
-        summary_path = self.training_history_save_dir / "kfold_summary.txt"
-        with open(summary_path, "w", encoding="utf-8") as f:
-            f.write(f"{'=' * 60}\n")
-            f.write(f"{self.n_folds}折交叉验证摘要\n")
-            f.write(f"{'=' * 60}\n\n")
-            f.write(f"总训练时间: {total_time / 60:.2f} 分钟\n")
-            f.write(f"平均每折时间: {total_time / self.n_folds / 60:.2f} 分钟\n\n")
-
-            f.write("整体反归一化指标 (Mean ± Std):\n")
-            for metric_name, values in overall_metrics.items():
-                f.write(
-                    f"  {metric_name.upper()}: {np.mean(values):.6f} ± {np.std(values):.6f}\n"
-                )
-
-            f.write("\n各表型反归一化指标 (Mean ± Std):\n")
-            for pheno_name in self.phenotype_names:
-                f.write(f"  {pheno_name:>5}:\n")
-                for metric_name, values in phenotype_metrics[pheno_name].items():
-                    f.write(
-                        f"    {metric_name.upper()}: {np.mean(values):.6f} ± {np.std(values):.6f}\n"
-                    )
-
-        self.logger.info(f"K折摘要已保存: {summary_path}\n")
+        pd.DataFrame([
+            {"fold": result["fold"], "best_epoch": result["best_epoch"],
+             "best_val_loss": result["best_val_loss"],
+             **result["test_results"]["denormalized"]["overall"]}
+            for result in fold_results
+        ]).to_csv(directory / "kfold_fold_details.csv", index=False)
+        pd.DataFrame([
+            {"Metric": key, "Mean": values["mean"], "Std": values["std"]}
+            for key, values in summary["overall_statistics"].items()
+        ]).to_csv(directory / "kfold_overall_stats.csv", index=False)
+        pd.DataFrame([
+            {"Phenotype": name, "Metric": key, "Mean": values["mean"], "Std": values["std"]}
+            for name, metrics in summary["phenotype_statistics"].items() for key, values in metrics.items()
+        ]).to_csv(directory / "kfold_phenotype_stats.csv", index=False)
+        predictions = pd.concat(prediction_frames, ignore_index=True)
+        predictions = predictions.sort_values(["sample_idx", "phenotype"], kind="stable")
+        predictions.to_csv(directory / "kfold_predictions.csv", index=False)
+        for key, values in summary["overall_statistics"].items():
+            self.logger.info(f"K折 {key.upper()}: {values['mean']:.6f} ± {values['std']:.6f}")
+        return summary
 
     def train(self) -> dict[str, Any]:
         """根据配置选择训练模式（K折交叉验证或常规训练）。
@@ -1522,6 +1216,7 @@ class TFPPTrainer:
         )
         if self.use_kfold:
             self.logger.info(f"    折数: {self.n_folds}")
+            self.logger.info(f"    外层 train 内验证比例: {self.config.kfold_val_ratio}")
         else:
             self.logger.info(f"    train_ratio: {self.train_ratio}")
             self.logger.info(f"    val_ratio: {self.val_ratio}")

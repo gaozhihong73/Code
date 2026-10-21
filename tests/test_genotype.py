@@ -177,28 +177,11 @@ class GenotypeTests(unittest.TestCase):
 
     def test_real_and_simulated_pipelines_screen_identical_dosage(self):
         snp_path, paths = self.write_inputs()
-        real_module = importlib.import_module("trainer.TFPP_Trainer")
-        with (
-            redirect_stdout(io.StringIO()),
-            patch.object(Path, "mkdir"),
-            patch.object(real_module, "Logger", return_value=Mock()),
-            patch.object(TFPPTrainer, "_create_model", return_value=Mock()),
-            patch("utils.compute_cache_key", return_value=None),
-            patch("utils.screen_snps", wraps=screen_snps) as real_screen,
-            patch.object(
-                TrainingDosageImputer, "fit", side_effect=AssertionError("禁止生产fit")
-            ),
-        ):
-            trainer = TFPPTrainer(
-                TFPPConfig(
-                    snp_file=snp_path,
-                    pheno_dir=str(self.root),
-                    phenotype_names=["toy"],
-                    screen_k=4,
-                    gwas_k=4,
-                    use_kfold=True,  # 第2步后此测试仅覆盖尚未迁移的旧K折路径。
-                    device="cpu",
-                )
+        dataset = TFPPDataset(snp_path, str(self.root), ["toy"])
+        with redirect_stdout(io.StringIO()):
+            real_indices = screen_snps(
+                model_codes_to_dosage(dataset.snp), dataset.phenotype,
+                screen_k=4, gwas_k=4, multivariate=True, verbose=False,
             )
         with (
             redirect_stdout(io.StringIO()),
@@ -213,12 +196,10 @@ class GenotypeTests(unittest.TestCase):
             simulated = SimTFPPDataset(
                 **paths, phenotype_names=["toy"], screen_k=4, gwas_k=4
             )
-        np.testing.assert_array_equal(real_screen.call_args.args[0], self.dosage)
         np.testing.assert_array_equal(sim_screen.call_args.args[0], self.dosage)
         np.testing.assert_array_equal(
-            model_codes_to_dosage(trainer.dataset.snp), simulated.snp_train
+            model_codes_to_dosage(dataset.snp)[:, real_indices], simulated.snp_train
         )
-        self.assertTrue(real_screen.call_args.kwargs["multivariate"])
         self.assertTrue(sim_screen.call_args.kwargs["multivariate"])
         loaders = get_sim_dataloader(simulated, 4, "global", "zscore", num_workers=0)
         for loader, dosage in zip(
@@ -242,7 +223,7 @@ class GenotypeTests(unittest.TestCase):
         np.testing.assert_array_equal(mae.snp[:, :12], dataset.snp)
         np.testing.assert_array_equal(mae.snp[:, 12:], 0)
 
-    def test_production_missing_stops_without_automatic_fit(self):
+    def test_kfold_init_defers_fit_and_sim_missing_still_errors(self):
         snp_path, paths = self.write_inputs()
         raw = self.dosage.astype(np.float32)
         raw[0, 0] = -1
@@ -254,23 +235,16 @@ class GenotypeTests(unittest.TestCase):
         with (
             patch.object(Path, "mkdir"),
             patch.object(real_module, "Logger", return_value=Mock()),
-            patch.object(TFPPTrainer, "_create_model", return_value=Mock()),
-            patch("utils.compute_cache_key", return_value=None),
+            patch("utils.screen_snps") as screen,
             patch.object(TrainingDosageImputer, "fit") as fit,
         ):
-            with self.assertRaisesRegex(ValueError, "禁止当作剂量0"):
-                TFPPTrainer(
-                    TFPPConfig(
-                        snp_file=snp_path,
-                        pheno_dir=str(self.root),
-                        phenotype_names=["toy"],
-                        screen_k=4,
-                        gwas_k=4,
-                        screen_missing_strategy="mode",
-                        use_kfold=True,  # 普通训练现已允许仅训练个体拟合。
-                        device="cpu",
-                    )
-                )
+            trainer = TFPPTrainer(TFPPConfig(
+                snp_file=snp_path, pheno_dir=str(self.root), phenotype_names=["toy"],
+                screen_k=4, gwas_k=4, screen_missing_strategy="mode",
+                use_kfold=True, device="cpu",
+            ))
+            self.assertIsNone(trainer.model)
+            screen.assert_not_called()
             fit.assert_not_called()
         with (
             redirect_stdout(io.StringIO()),

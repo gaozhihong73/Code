@@ -102,7 +102,12 @@ class TFPPConfig(BaseModel):
 
     # K折交叉验证参数
     use_kfold: bool = False  # 是否使用K折交叉验证
-    n_folds: int = 10  # K折数量
+    n_folds: int = Field(default=10, ge=2)  # 外层K折数量
+    kfold_val_ratio: float = Field(
+        default=0.1, gt=0, lt=1,
+        description="外层 train 内再划分给早停验证集的比例，不使用 test 选模型",
+    )
+    fold_index: int | None = Field(default=None, ge=1, description="内部折实验编号，从1开始")
 
     # 数据集参数
     train_ratio: float = 0.8
@@ -118,6 +123,8 @@ class TFPPConfig(BaseModel):
     def _validate_split_mode(self):
         if self.use_kfold and self.split_file is not None:
             raise ValueError("split_file 为单次 train/val/test 划分，不能与 use_kfold 同时使用")
+        if self.use_kfold and self.fold_index is not None:
+            raise ValueError("fold_index 仅用于已确定划分的内部折实验")
         return self
 
     # SNP 特征筛选参数 (0=不筛选)
@@ -138,11 +145,11 @@ class TFPPConfig(BaseModel):
     screen_missing_strategy: str = Field(
         default="error",
         pattern="^(error|mode)$",
-        description="筛选缺失策略：error=拒绝，mode=仅在普通训练 train_idx 上拟合逐位点众数",
+        description="筛选缺失策略：error=拒绝，mode=仅在当前普通/折内 train_idx 上拟合众数",
     )
     wide_missing_strategy: str = Field(
         default="mode", pattern="^(error|mode)$",
-        description="普通训练 Wide 剂量缺失策略，独立于筛选；mode 仅在训练个体拟合",
+        description="普通/折内 Wide 剂量缺失策略，独立于筛选；mode 仅在训练个体拟合",
     )
     screen_cache_dir: str = "dataset/screen_cache"
 

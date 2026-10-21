@@ -68,7 +68,7 @@ def compute_cache_key(
     train_genotype: np.ndarray | None = None,
     train_phenotype: np.ndarray | None = None,
 ) -> str:
-    """普通训练用训练个体内容指纹；旧K折/模拟调用保留路径+mtime 缓存。
+    """普通/折内训练用训练个体内容指纹；模拟调用保留路径+mtime 缓存。
 
     提供 train_indices 时不读取全数据文件 mtime，不受 held-out 数据修改影响。
     注意: multivariate 参与哈希, 避免多元/逐表型两种筛选结果互相污染缓存。
@@ -94,7 +94,7 @@ def compute_cache_key(
     missing_strategy : str, optional
         显式缺失策略标识，参与缓存键；编码/算法版本也参与缓存键。
     train_indices, train_genotype, train_phenotype : np.ndarray, optional
-        普通训练必须同时传入训练原始行号及训练子矩阵；只哈希这些内容。
+        普通/折内训练必须同时传入训练原始行号及训练子矩阵；只哈希这些内容。
 
     Returns
     -------

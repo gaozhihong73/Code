@@ -320,7 +320,7 @@ class RegularTFPPTests(unittest.TestCase):
             "screen_multivariate=False", Path(separate.config.log_file).read_text()
         )
 
-    def test_error_screening_rejects_training_missing_and_kfold_stays_legacy(self):
+    def test_error_screening_rejects_training_missing_and_kfold_defers_preprocessing(self):
         with self.assertRaisesRegex(ValueError, "禁止当作剂量0"):
             self.trainer(screen_missing_strategy="error")
         self.write_inputs(np.maximum(self.snp, 0), self.pheno)
@@ -331,8 +331,9 @@ class RegularTFPPTests(unittest.TestCase):
             trainer = self.trainer(
                 use_kfold=True, split_file=None, screen_missing_strategy="error"
             )
-        self.assertEqual(selector.call_args.args[0].shape[0], 40)
-        self.assertEqual(trainer.model.wide_input_mode, "legacy_categorical")
+        selector.assert_not_called()
+        self.assertIsNone(trainer.model)
+        self.assertEqual(trainer.dataset.snp.shape[1], 12)
 
     def test_new_model_cannot_silently_use_legacy_inference_rescreening(self):
         import infer

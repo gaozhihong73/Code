@@ -324,6 +324,10 @@ def save_model_config(config, model_dir: str | Path) -> None:
         "screening_algorithm_version": SCREENING_ALGORITHM_VERSION,
         "wide_input_mode": "legacy_categorical" if getattr(config, "use_kfold", True) else "dosage_v1",
         "wide_missing_strategy": getattr(config, "wide_missing_strategy", "legacy"),
+        "fold_index": getattr(config, "fold_index", None),
+        "n_folds": getattr(config, "n_folds", None),
+        "kfold_val_ratio": getattr(config, "kfold_val_ratio", None),
+        "seed": config.seed,
     }
 
     config_path = model_dir / "model_config.json"

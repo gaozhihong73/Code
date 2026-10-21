@@ -119,6 +119,29 @@ def generate_split(
     return result
 
 
+def split_from_indices(
+    train_idx, val_idx, test_idx, n_samples: int, *, seed: int = 73,
+    sample_ids: Sequence[str | int] | None = None,
+) -> IndividualSplit:
+    """将外部确定的个体索引封装成同一 manifest 格式，不重新随机划分。"""
+    n_samples, ids, source, digest = _sample_identity(n_samples, sample_ids)
+    validate_split_indices(train_idx, val_idx, test_idx, n_samples)
+    if isinstance(seed, bool) or not isinstance(seed, Integral):
+        raise ValueError("seed 必须为整数")
+    arrays = [np.asarray(values, dtype=np.int64).copy()
+              for values in (train_idx, val_idx, test_idx)]
+    result = IndividualSplit(*arrays, metadata={
+        "schema_version": 1, "seed": int(seed),
+        "ratios": [len(values) / n_samples for values in arrays],
+        "n_samples": n_samples, "sample_id_source": source,
+        "sample_ids": ids, "sample_ids_sha256": digest,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "generator": "explicit_individual_indices_v1",
+    })
+    _validate_split(result)
+    return result
+
+
 def _validate_split(split: IndividualSplit) -> None:
     meta = split.metadata
     required = {

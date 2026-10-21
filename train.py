@@ -209,12 +209,12 @@ def parse_args():
         "--screen_missing_strategy",
         choices=["error", "mode"],
         default=TFPPConfig.model_fields["screen_missing_strategy"].default,
-        help="筛选缺失策略；普通训练 mode 仅在 train_idx 上拟合众数，K折尚未接入",
+        help="筛选缺失策略；普通/折内 mode 仅在当前 train_idx 上拟合众数",
     )
     parser.add_argument(
         "--wide_missing_strategy", choices=["error", "mode"],
         default=TFPPConfig.model_fields["wide_missing_strategy"].default,
-        help="普通训练 Wide 剂量缺失策略；不改变 Deep 的缺失类别0",
+        help="普通/折内 Wide 剂量缺失策略；不改变 Deep 的缺失类别0",
     )
     parser.add_argument(
         "--screen_cache_dir", default=TFPPConfig.model_fields["screen_cache_dir"].default,
@@ -347,6 +347,11 @@ def parse_args():
         default=10,
         help="K 折交叉验证的折数 (仅 use_kfold=true 时生效)",
     )
+    parser.add_argument(
+        "--kfold_val_ratio", type=float,
+        default=TFPPConfig.model_fields["kfold_val_ratio"].default,
+        help="每折外层 train 中划给早停 val 的比例；test 仅最终评分",
+    )
 
     return parser.parse_args()
 
@@ -401,6 +406,7 @@ def main():
         ablation_mode=args.ablation_mode,
         use_kfold=args.use_kfold,
         n_folds=args.n_folds,
+        kfold_val_ratio=args.kfold_val_ratio,
     )
 
     TFPPTrainer(config=config).train()
