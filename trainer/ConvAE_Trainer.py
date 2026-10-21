@@ -372,38 +372,8 @@ class ConvAETrainer:
         pd.DataFrame(history).to_csv(self.training_history_save_dir / "training_history.csv", index=False)
 
     def _compress_data(self, best_model_state: dict[str, Any]):
-        """
-        全量数据压缩逻辑：提取编码器最终的隐空间特征并落盘
-        """
-        self.logger.info("=" * 80)
-        self.logger.info("开始全量数据特征压缩...")
-
-        if best_model_state is not None:
-            self.model.load_state_dict(best_model_state)
-        self.model.eval()
-
-        # 复用 dataset 提取纯数据
-        compress_loader = DataLoader(
-            self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=0
-        )
-        compressed_features = []
-
-        with torch.no_grad():
-            for X_chunks, _ in compress_loader:
-                X_chunks = X_chunks.to(self.device)
-                with torch.autocast("cuda", enabled=self.is_cuda):
-                    # 调用模型本身前向获得压缩特征，此时掩码比率一定为 0
-                    compressed_final_X, _, _, _ = self.model(X_chunks, mask_ratio=0.0, padding_mask=self.dataset.chunk_padding_mask.to(self.device))
-
-                    # 展平特征：[B, Num_Chunks, d_ext] -> [B, Num_Chunks * d_ext]
-                    batch_features = compressed_final_X.view(X_chunks.shape[0], -1)
-                    compressed_features.append(batch_features.cpu().numpy())
-
-        final_array = np.concatenate(compressed_features, axis=0)
-        save_path = self.compressed_snp_save_dir / "snp_compressed.npy"
-        np.save(str(save_path), final_array)
-
-        self.logger.info(f"压缩结果已保存: {save_path} (Shape: {final_array.shape})")
+        """禁止旧的全量压缩入口绕过严格 checkpoint 和 split 校验。"""
+        raise ValueError("请使用 export_convae.py 从严格加载的最佳 checkpoint 导出 train/val/test 特征")
 
     def _log_configuration(self):
         """记录配置信息"""

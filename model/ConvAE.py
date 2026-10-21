@@ -110,7 +110,7 @@ class ConvAE(nn.Module):
     def model_config(self) -> dict:
         return {"model_version": MODEL_VERSION, **self._config}
 
-    def forward(self, x, mask_ratio=0.5, *, padding_mask=None, reconstruction_mask=None, generator=None):
+    def _encode(self, x, mask_ratio, *, padding_mask=None, reconstruction_mask=None, generator=None):
         if x.ndim != 3 or tuple(x.shape[1:]) != (self.num_chunks, self.chunk_size):
             raise ValueError("ConvAE 输入必须为 [batch, num_chunks, chunk_size]，并与模型配置一致")
         padding = expand_padding_mask(x, padding_mask)
@@ -124,7 +124,8 @@ class ConvAE(nn.Module):
         weights = (~padded).sum(dim=-1)
         valid = weights > 0
         if reconstruction_mask is None:
-            selected = sample_patch_mask(valid, mask_ratio, generator=generator)
+            selected = (torch.zeros_like(valid) if mask_ratio == 0
+                        else sample_patch_mask(valid, mask_ratio, generator=generator))
         else:
             selected = torch.as_tensor(reconstruction_mask, device=x.device)
             if selected.shape == (batch, chunks, self.num_patches):
@@ -145,6 +146,27 @@ class ConvAE(nn.Module):
         pooled = (memory * pool_weights[..., None]).sum(dim=1) / pool_weights.sum(dim=1).clamp_min(1)[:, None]
         compressed = self.compress_layer(pooled).masked_fill(~active[:, None], 0)
         compressed = compressed.reshape(batch, chunks, self.d_ext)
+        return (compressed, features, memory, memory_padding, active, order,
+                selected, valid, padded, batch, chunks, rows)
+
+    @torch.inference_mode()
+    def encode_features(self, x: torch.Tensor, *, padding_mask: torch.Tensor) -> torch.Tensor:
+        """仅编码未遮挡 SNP；固定 chunk-major/C-order 展平为 [B, chunks*d_ext]。
+
+        不调用辅助头或 decoder，不接收 phenotype/scaler；调用者必须显式提供 padding。
+        eval 会关闭 dropout，mask_ratio=0 路径不消耗随机数。
+        """
+        if padding_mask is None:
+            raise ValueError("encode_features 必须显式提供结构性 padding_mask；不得猜测类别0含义")
+        self.eval()
+        compressed = self._encode(x, 0, padding_mask=padding_mask)[0]
+        return compressed.flatten(start_dim=1)
+
+    def forward(self, x, mask_ratio=0.5, *, padding_mask=None, reconstruction_mask=None, generator=None):
+        (compressed, features, memory, memory_padding, active, order,
+         selected, valid, padded, batch, chunks, rows) = self._encode(
+             x, mask_ratio, padding_mask=padding_mask,
+             reconstruction_mask=reconstruction_mask, generator=generator)
         phenotype = (self.phenotype_head(compressed.reshape(batch, -1)).reshape(
             batch, self.n_phenotypes, self.n_time_points) if self.phenotype_head is not None else None)
         logits = None

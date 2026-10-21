@@ -566,3 +566,80 @@ CPU 合成测试（无需真实数据或 GPU）：
 .venv/bin/python -B -m unittest discover -s tests -v
 git diff --check
 ```
+
+## ConvAE 潜在特征导出（第7步）
+
+`export_convae.py` 只通过严格 `load_convae_model()` 加载当前 split/fold 上由 train
+训练、由 val 选出的 `models/best_model.pt`；第6步的 schema 3 产物和 v2 checkpoint
+继续兼容。旧 `_compress_data()` 入口明确报错，不能绕过最佳模型/产物校验。
+训练不自动导出；TFPP 模型及输入接口保持原样。
+
+```bash
+.venv/bin/python -B export_convae.py \
+  --model_path outputs/convae/<experiment>/<split_or_fold> \
+  --split_file splits/individuals_n400_seed73.npz \
+  --snp_file dataset/maize/snp/snp_50000.npy --batch_size 32 --device cpu
+```
+
+`--model_path` 使用训练日志中的实际实验目录；K折传入训练时使用的同一 fold manifest。
+`--split_file` 必须显式指定，校验文件 SHA256 与保存的三组索引；不按 seed 重建。
+`--snp_file` 可省略，默认保存配置中的原始 dosage 文件（0/1/2，缺失 -1/NaN）。
+当前 sample_id 是原始行索引，SNP 文件必须保持原个体行序，无法鉴别无 ID 文件的生物学身份。
+可用 `--checkpoint_sha256 <hash>` 和 `--model_config <models/model_config.json>`
+进一步绑定任务预期。缺少产物、哈希/配置不符或非法 SNP 编码均失败。
+
+`ConvAE.encode_features(x, padding_mask=...) -> Tensor[B,D]` 使用 `eval()` 和
+`inference_mode()`；只走编码器，不调用表型头/decoder、不抽随机掩码、不读表型 CSV。
+严格加载器仍校验训练 scaler 的完整性，但它不传入编码函数或参与特征计算。
+Deep 输入为模型类别码，真实缺失保留0；结构性 padding 由独立 mask 排除。
+表示固定为 chunk-major C-order 展平：`D = num_chunks * d_ext`，
+`column = chunk_index * d_ext + feature_index`，按 SNP 起点递增保留最后不完整 chunk。
+
+默认产物：
+
+```text
+<experiment>/exports/<split_fingerprint>/<checkpoint_sha256>/<snp_file_sha256>/
+├── metadata.json
+└── features/
+    ├── train.npy             # float32 [N_train, D]
+    ├── train_sample_ids.npy  # int64 [N_train]，manifest 顺序
+    ├── val.npy
+    ├── val_sample_ids.npy
+    ├── test.npy
+    └── test_sample_ids.npy
+```
+
+`--output_root` 可改导出根目录；不同 split/fold、checkpoint、SNP 内容分别寻址。
+已存在目录禁止覆盖，重复独立复现应使用另一输出根目录。
+`encode_feature_batches()` 将批次按 sample_id 恢复 manifest 原序，拒绝重复、缺失或额外 ID。
+写入后 `load_exported_features()` 重新校验每个文件 SHA256、shape、dtype、有限值及 ID 顺序；
+写入/校验失败清理本次新目录。
+
+metadata 摘要示例（40个合成个体、13 SNP、chunk_size=8、overlap=2、d_ext=4）：
+
+```json
+{
+  "export_schema_version": 1,
+  "preprocessing_schema_version": 3,
+  "latent_layout": "chunk_major_flatten_C_order",
+  "original_snp_dim": 13,
+  "num_chunks": 2,
+  "d_ext": 4,
+  "latent_dim": 8,
+  "reconstruction_mask_ratio": 0,
+  "encoder_only": true
+}
+```
+
+完整 JSON 另含 git commit/dirty、split/fold/样本顺序、checkpoint 和数据文件路径/哈希、
+配置及模型选择口径、表型/时间点、编码与 padding 规则、每组数组 shape/dtype/文件内容哈希。
+同 checkpoint/输入重复导出相同，CPU 不同 batch size 的测试容差为 `rtol=1e-5, atol=1e-6`。
+
+CPU 合成冒烟测试自动在临时目录生成40个体、13 SNP、真实缺失与结构性 padding，
+单轮训练最小模型后通过上述 CLI 导出三集合（24/8/8行，每行8维），结束清理临时产物：
+
+```bash
+.venv/bin/python -B -m unittest discover -s tests -p test_convae_export.py -v
+.venv/bin/python -B -m unittest discover -s tests -v
+git diff --check
+```
