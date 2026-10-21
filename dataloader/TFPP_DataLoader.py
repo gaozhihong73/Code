@@ -337,9 +337,7 @@ def get_dataloader(
     generator = torch.Generator().manual_seed(seed)
     # 此处的 random_split 只是为了获取纯净的互斥索引
     train_subset, val_subset, test_subset = random_split(
-        range(
-            len(dataset)
-        ),  # 直接对长度进行 split，避免生成复杂的 Subset 套娃 # type: ignore
+        range(len(dataset)),  # 直接对长度进行 split，避免生成复杂的 Subset 套娃 # type: ignore
         lengths=[train_ratio, val_ratio, test_ratio],
         generator=generator,
     )

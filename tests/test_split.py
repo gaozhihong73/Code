@@ -15,6 +15,7 @@ from torch.utils.data import Dataset, random_split
 from config import ConvAEConfig, TFPPConfig
 from dataloader.ConvAE_DataLoader import get_mae_dataloader
 from dataloader.TFPP_DataLoader import get_dataloader, get_dataloader_with_kfold
+from utils.Normalization import denormalize_phenotype
 from utils.Split import (
     default_split_path,
     generate_split,
@@ -23,7 +24,6 @@ from utils.Split import (
     save_split,
     validate_split_indices,
 )
-from utils.Normalization import denormalize_phenotype
 
 
 class ToyDataset(Dataset):
@@ -57,14 +57,19 @@ class SplitTests(unittest.TestCase):
                 first = generate_split(count, seed=73)
                 self.assert_same_indices(first, generate_split(count, seed=73))
                 original = random_split(
-                    range(count), [0.8, 0.1, 0.1],
+                    range(count),
+                    [0.8, 0.1, 0.1],
                     generator=torch.Generator().manual_seed(73),
                 )
                 for actual, expected in zip(
                     (first.train_idx, first.val_idx, first.test_idx), original
                 ):
                     np.testing.assert_array_equal(actual, expected.indices)
-                self.assertFalse(np.array_equal(first.train_idx, generate_split(count, seed=74).train_idx))
+                self.assertFalse(
+                    np.array_equal(
+                        first.train_idx, generate_split(count, seed=74).train_idx
+                    )
+                )
 
     def test_disjoint_and_complete_coverage(self):
         split = generate_split(43)
@@ -122,7 +127,8 @@ class SplitTests(unittest.TestCase):
 
     def test_invalid_generation_inputs_are_rejected(self):
         for kwargs in (
-            {"n_samples": 0}, {"n_samples": 2.5},
+            {"n_samples": 0},
+            {"n_samples": 2.5},
             {"sample_ids": ["a", "a"]},
             {"n_samples": 3, "sample_ids": ["a", "b"]},
             {"n_samples": 40, "ratios": (0.8, 0.2, 0.1)},
@@ -149,7 +155,9 @@ class SplitTests(unittest.TestCase):
         self.assertNotEqual(base, default_split_path(40, seed=74))
         self.assertNotEqual(base, default_split_path(40, ratios=(0.8, 0.2, 0)))
         ids = [f"id-{i}" for i in range(40)]
-        self.assertNotEqual(default_split_path(sample_ids=ids), default_split_path(sample_ids=ids[::-1]))
+        self.assertNotEqual(
+            default_split_path(sample_ids=ids), default_split_path(sample_ids=ids[::-1])
+        )
         with patch("utils.Split.default_split_path", return_value=self.path):
             created = load_or_create_split("auto", 40)
             self.assert_same_indices(created, load_or_create_split("auto", 40))
@@ -164,8 +172,13 @@ class SplitTests(unittest.TestCase):
                     metadata["sample_ids_sha256"] = "invalid"
                 else:
                     train_idx[0] = split.val_idx[0]
-                np.savez(self.path, train_idx=train_idx, val_idx=split.val_idx,
-                         test_idx=split.test_idx, metadata=np.asarray(json.dumps(metadata)))
+                np.savez(
+                    self.path,
+                    train_idx=train_idx,
+                    val_idx=split.val_idx,
+                    test_idx=split.test_idx,
+                    metadata=np.asarray(json.dumps(metadata)),
+                )
                 with self.assertRaises(ValueError):
                     load_split(self.path)
 
@@ -173,37 +186,67 @@ class SplitTests(unittest.TestCase):
         dataset = ToyDataset()
         split = generate_split(len(dataset))
         tfpp = get_dataloader(
-            dataset, 4, "global", "zscore", num_workers=0, indices=split,
-            train_ratio=0.2, val_ratio=0.4, test_ratio=0.4, seed=9,
+            dataset,
+            4,
+            "global",
+            "zscore",
+            num_workers=0,
+            indices=split,
+            train_ratio=0.2,
+            val_ratio=0.4,
+            test_ratio=0.4,
+            seed=9,
         )
         mae = get_mae_dataloader(
-            dataset, batch_size=4, num_workers=0, indices=split,
-            train_ratio=0.5, val_ratio=0.5, seed=9,
+            dataset,
+            batch_size=4,
+            num_workers=0,
+            indices=split,
+            train_ratio=0.5,
+            val_ratio=0.5,
+            seed=9,
         )
-        for loader, expected in zip(tfpp[:3], (split.train_idx, split.val_idx, split.test_idx)):
+        for loader, expected in zip(
+            tfpp[:3], (split.train_idx, split.val_idx, split.test_idx)
+        ):
             np.testing.assert_array_equal(loader.dataset.tensors[0][:, 0], expected)
             self.assertEqual(loader.dataset.tensors[1].shape, (len(expected), 1, 3))
             restored = denormalize_phenotype(loader.dataset.tensors[1], tfpp[3]).numpy()
             np.testing.assert_allclose(restored, dataset.phenotype[expected], atol=2e-5)
         self.assertEqual(mae[0].dataset.indices, split.train_idx.tolist())
         self.assertEqual(mae[1].dataset.indices, split.val_idx.tolist())
-        self.assertFalse(set(mae[0].dataset.indices + mae[1].dataset.indices) & set(split.test_idx))
+        self.assertFalse(
+            set(mae[0].dataset.indices + mae[1].dataset.indices) & set(split.test_idx)
+        )
 
     def test_loaders_without_explicit_split_keep_legacy_behavior(self):
         dataset = ToyDataset()
         split = generate_split(40)
         loaders = get_dataloader(dataset, 4, "global", "zscore", num_workers=0)
-        for loader, expected in zip(loaders[:3], (split.train_idx, split.val_idx, split.test_idx)):
+        for loader, expected in zip(
+            loaders[:3], (split.train_idx, split.val_idx, split.test_idx)
+        ):
             np.testing.assert_array_equal(loader.dataset.tensors[0][:, 0], expected)
         mae = get_mae_dataloader(dataset, num_workers=0)
-        original = random_split(dataset, [0.8, 0.2], generator=torch.Generator().manual_seed(73))
+        original = random_split(
+            dataset, [0.8, 0.2], generator=torch.Generator().manual_seed(73)
+        )
         self.assertEqual(mae[0].dataset.indices, original[0].indices)
         self.assertEqual(mae[1].dataset.indices, original[1].indices)
 
     def test_kfold_loader_validates_explicit_indices(self):
         with self.assertRaises(ValueError):
-            get_dataloader_with_kfold([0, 1], [1], list(range(2, 40)), ToyDataset(),
-                                     4, "cpu", "global", "zscore", num_workers=0)
+            get_dataloader_with_kfold(
+                [0, 1],
+                [1],
+                list(range(2, 40)),
+                ToyDataset(),
+                4,
+                "cpu",
+                "global",
+                "zscore",
+                num_workers=0,
+            )
         with self.assertRaises(ValueError):
             TFPPConfig(use_kfold=True, split_file=str(self.path))
 
@@ -228,14 +271,18 @@ class SplitTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 module = importlib.import_module(f"trainer.{kind}_Trainer")
                 obj = trainer_class.__new__(trainer_class)
-                obj.config = (TFPPConfig if kind == "TFPP" else ConvAEConfig)(split_file=str(self.path), device="cpu")
+                obj.config = (TFPPConfig if kind == "TFPP" else ConvAEConfig)(
+                    split_file=str(self.path), device="cpu"
+                )
                 obj.dataset, obj.num_sample = dataset, len(dataset)
                 obj.train_ratio, obj.val_ratio, obj.test_ratio = 0.8, 0.2, 0.0
                 obj.seed, obj.batch_size, obj.num_workers, obj.device = 9, 4, 0, "cpu"
                 obj.norm_method, obj.scaler_type = "global", "zscore"
                 obj.scaler_file, obj.logger = "unused", Mock()
                 obj._log_configuration = Mock()
-                obj._create_optimizer_and_scheduler = Mock(side_effect=RuntimeError("stop-before-training"))
+                obj._create_optimizer_and_scheduler = Mock(
+                    side_effect=RuntimeError("stop-before-training")
+                )
                 if kind == "TFPP":
                     # 普通训练在 __init__ 中固定划分；直接测试数据准备入口。
                     dataset.snp = np.tile(np.array([[1, 2, 3]], dtype=np.int8), (40, 1))
@@ -261,7 +308,9 @@ class SplitTests(unittest.TestCase):
                 loader = getattr(module, loader_name)
                 with patch.object(module, loader_name, wraps=loader) as wrapped:
                     with patch.object(module, "save_scalers", create=True):
-                        with self.assertRaisesRegex(RuntimeError, "stop-before-training"):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "stop-before-training"
+                        ):
                             (obj._train_regular if kind == "TFPP" else obj.train)()
                 self.assert_same_indices(shared, wrapped.call_args.kwargs["indices"])
 
