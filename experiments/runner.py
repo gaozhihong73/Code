@@ -17,6 +17,7 @@ from threadpoolctl import threadpool_limits
 from config import TFPPConfig
 from trainer import TFPPTrainer
 from utils.ConvAE_Ridge import (load_ridge_probe, metric_hierarchy, run_ridge_baseline, save_probe_targets)
+from utils.Inference import transform_phenotypes
 from utils.Genotype import TrainingDosageImputer, dosage_to_model_codes, prepare_screening_dosage
 from utils.Screening import (SCREENING_ALGORITHM_VERSION, array_fingerprint, dc_sis_screen,
                              gwas_screen, _multivariate_pheno_matrix)
@@ -181,7 +182,7 @@ def run_unit(item: dict, *, resume: bool = False) -> Path:
         if status["state"] == "success":
             validate_result(root)
             return root
-        if status["test_evaluation_count"]:
+        if status["test_evaluation_count"] or (root / "test_reservation.json").exists():
             raise ValueError("test 已预约/评估，禁止失败重试中读取或再次评估 test；请人工审查")
         attempt = status["attempt"] + 1
     else:
@@ -200,6 +201,8 @@ def run_unit(item: dict, *, resume: bool = False) -> Path:
     def reserve():
         if state["test_evaluation_count"]:
             raise ValueError("test 已预约，禁止重复评估")
+        with (root / "test_reservation.json").open("x", encoding="utf-8") as handle:
+            json.dump({"config_hash": config_hash, "attempt": attempt, "test_evaluation_count": 1}, handle)
         state["test_evaluation_count"] = 1
         write_json(root / "status.json", state)
     try:
@@ -267,21 +270,34 @@ def run_unit(item: dict, *, resume: bool = False) -> Path:
                 initialization = time.perf_counter() - init_start
                 trainer.logger.set_console_level("ERROR")
                 trainer.train()
+                # 使用生产严格加载器和推理输入接口重放，不再次读取 test 标签或计算 test 指标。
+                from utils.model_loader import load_tfpp_model
+                from utils.Normalization import denormalize_phenotype
+                from infer import prepare_test_data
+                replay_start = time.perf_counter()
+                replay_model, replay_info = load_tfpp_model(trainer.config.output_dir, device=trainer.device, verbose=False)
+                replay_codes, _, _ = prepare_test_data(resolved["data"]["snp"]["path"], replay_info["artifacts"])
+                with torch.inference_mode():
+                    replay_norm = torch.cat([replay_model(batch.to(trainer.device)).cpu()
+                        for batch in replay_codes.split(trainer.batch_size)])
+                replay_raw = denormalize_phenotype(replay_norm, replay_info["artifacts"].scalers).numpy()
+                np.testing.assert_allclose(replay_raw, trainer.test_predictions["predictions"], rtol=1e-5, atol=1e-6)
+                trainer.timings["prediction_replay"] = time.perf_counter() - replay_start
                 preds = trainer.test_predictions
                 norm, raw, true = preds["predictions_normalized"], preds["predictions"], y[split.test_idx]
                 norm_true = preds["targets_normalized"]
                 metrics = {"normalized": metric_hierarchy(norm, norm_true, traits, resolved["data"]["time_labels"]),
                            "denormalized": metric_hierarchy(raw, true, traits, resolved["data"]["time_labels"])}
-                backend = {"raw": raw, "norm": norm, "true": true, "metrics": metrics,
+                backend = {"raw": raw, "norm": norm, "true": true, "true_norm": norm_true, "metrics": metrics,
                     "times": {**trainer.timings, "screening": screening_seconds, "preprocessing_model_init": initialization},
-                    "parameters": sum(p.numel() for p in trainer.model.parameters()), "actual_input_dim": len(actual),
+                    "replay_verified": True, "parameters": sum(p.numel() for p in trainer.model.parameters()), "actual_input_dim": len(actual),
                     "history": str(trainer.training_history_save_dir.relative_to(root)),
                     "model_config": str((trainer.best_model_save_dir / "model_config.json").relative_to(root)),
                     "model_artifact": str((trainer.best_model_save_dir / "best_model.pt").relative_to(root)),
                     "feature_artifact": str((work / "screened_indices.npy").relative_to(root))}
         ids = np.asarray(split.metadata["sample_ids"])[split.test_idx]
         np.savez_compressed(work / "predictions.npz", sample_ids=ids, predictions=backend["raw"],
-                            targets=backend["true"], predictions_normalized=backend["norm"])
+                            targets=backend["true"], predictions_normalized=backend["norm"], targets_normalized=backend["true_norm"])
         rows = [{"sample_id": int(ids[i]), "fold": resolved["fold"], "split": "test",
                  "split_sha256": resolved["outer_split"]["sha256"], "phenotype": trait,
                  "time_point": label, "true": float(backend["true"][i, p, t]), "prediction": float(backend["raw"][i, p, t])}
@@ -291,7 +307,7 @@ def run_unit(item: dict, *, resume: bool = False) -> Path:
         write_json(work / "metrics.json", backend["metrics"])
         write_json(work / "environment.json", {"platform": platform.platform(), "torch": str(torch.__version__),
             "numpy": np.__version__, "torch_threads": torch.get_num_threads(), "blas_thread_limit": 1})
-        manifest = {"schema_version": 1, "config_hash": config_hash, "code": resolved["code"], "axes": _axes(resolved),
+        manifest = {"schema_version": 1, "metrics_protocol": resolved["metrics_protocol"], "std_ddof": 0, "replay_verified": backend["replay_verified"], "config_hash": config_hash, "code": resolved["code"], "axes": _axes(resolved),
             "subset_sha256": resolved["subset_sha256"], "sample_ids": {role: np.asarray(split.metadata["sample_ids"])[getattr(split, role + "_idx")].tolist() for role in ("train", "val", "test")},
             "actual_input_dim": backend["actual_input_dim"], "model_parameter_count": backend["parameters"],
             "times_seconds": {**backend["times"], "total": time.perf_counter() - start},
@@ -306,8 +322,9 @@ def run_unit(item: dict, *, resume: bool = False) -> Path:
             "metrics": str((work / "metrics.json").relative_to(root))}
         write_json(root / "manifest.json", manifest)
         files = {str(p.relative_to(root)): file_digest(p) for p in work.rglob("*") if p.is_file()}
-        files.update({"resolved_config.json": file_digest(root / "resolved_config.json"), "manifest.json": file_digest(root / "manifest.json")})
+        files.update({"resolved_config.json": file_digest(root / "resolved_config.json"), "manifest.json": file_digest(root / "manifest.json"), "test_reservation.json": file_digest(root / "test_reservation.json")})
         write_json(root / "artifacts.json", files)
+        _verify_inputs(resolved)
         state["state"] = "success"
         write_json(root / "status.json", state)
         validate_result(root)
@@ -343,9 +360,12 @@ def _run_ridge(resolved, work, split, y, reserve):
         raw, norm, true = saved["y_pred"], saved["y_pred_normalized"], saved["y_true"]
     shutil.copyfile(export_ref["path"], work / "export_metadata.json")
     write_json(work / "feature_hashes.json", meta["arrays"])
-    return {"raw": raw, "norm": norm, "true": true, "metrics": json.loads((result / "metrics.json").read_text()),
+    return {"raw": raw, "norm": norm, "true": true,
+        "true_norm": transform_phenotypes(true, package["phenotype_scaler"]).numpy(),
+        "metrics": json.loads((result / "metrics.json").read_text()),
         "times": {"training": summary["fit_seconds"], "validation": summary["validation_seconds"],
                   "inference": summary["inference_seconds"], "screening": 0.0},
+        "replay_verified": bool(summary["prediction_replay_check"]),
         "parameters": int(package["model"].coef_.size + package["model"].intercept_.size),
         "actual_input_dim": meta["latent_dim"], "history": str((result / "alpha_search.json").relative_to(work.parent)),
         "model_config": str((result / "config.json").relative_to(work.parent)),
@@ -372,7 +392,7 @@ def validate_result(root: str | Path) -> tuple[dict, dict]:
     if (manifest["axes"] != _axes(resolved) or manifest["subset_sha256"] != resolved["subset_sha256"]
             or manifest["test_evaluation_count"] != 1):
         raise ValueError("结果实验轴/训练子集/评估状态不一致")
-    required = {"manifest.json", "resolved_config.json", manifest["split_artifact"], manifest["predictions"],
+    required = {"manifest.json", "resolved_config.json", "test_reservation.json", manifest["split_artifact"], manifest["predictions"],
                 manifest["predictions_csv"], manifest["metrics"], manifest["feature_artifact"],
                 manifest["model_config_artifact"], manifest["model_artifact"]}
     if not required.issubset(hashes):
@@ -383,6 +403,9 @@ def validate_result(root: str | Path) -> tuple[dict, dict]:
             raise ValueError(f"结果产物哈希不匹配: {name}")
     if not any(name == manifest["history"] or name.startswith(manifest["history"] + "/") for name in hashes):
         raise ValueError("缺少训练 history 哈希")
+    reservation = json.loads((root / "test_reservation.json").read_text())
+    if reservation != {"config_hash": status["config_hash"], "attempt": status["attempt"], "test_evaluation_count": 1}:
+        raise ValueError("test 预约与状态不一致")
     split = load_split(root / manifest["split_artifact"])
     for role in ("train", "val", "test"):
         if (getattr(split, role + "_idx").tolist() != resolved["subset"][role + "_idx"]
@@ -426,9 +449,12 @@ def validate_result(root: str | Path) -> tuple[dict, dict]:
                 or saved["predictions"].shape != (len(expected), len(resolved["unit"]["traits"]), len(resolved["data"]["time_labels"]))
                 or saved["targets"].shape != saved["predictions"].shape
                 or saved["predictions_normalized"].shape != saved["predictions"].shape
+                or saved["targets_normalized"].shape != saved["predictions"].shape
+                or not np.isfinite(saved["targets_normalized"]).all()
                 or not np.isfinite(saved["predictions_normalized"]).all()
                 or not np.isfinite(saved["predictions"]).all() or not np.isfinite(saved["targets"]).all()):
             raise ValueError("预测 sample_id/shape/有限值不一致")
+        prediction_snapshot = {key: saved[key].copy() for key in ("predictions", "targets", "predictions_normalized", "targets_normalized")}
     metrics = json.loads((root / manifest["metrics"]).read_text())
     names, labels = resolved["unit"]["traits"], resolved["data"]["time_labels"]
     for scale in ("normalized", "denormalized"):
@@ -459,6 +485,20 @@ def validate_result(root: str | Path) -> tuple[dict, dict]:
             or not (frame["split"] == "test").all()
             or not (frame["split_sha256"] == resolved["outer_split"]["sha256"]).all()):
         raise ValueError("逐样本预测 CSV 身份/trait/time 行序不完整")
+    if (not np.allclose(frame["prediction"], prediction_snapshot["predictions"].ravel(), rtol=1e-6, atol=1e-7)
+            or not np.allclose(frame["true"], prediction_snapshot["targets"].ravel(), rtol=1e-6, atol=1e-7)
+            or (not frame["fold"].isna().all() if resolved["fold"] is None else not (frame["fold"] == resolved["fold"]).all())):
+        raise ValueError("预测 CSV 数值/fold 与 NPZ 不一致")
+    def compare(actual, expected):
+        if isinstance(expected, dict):
+            if set(actual) != set(expected):
+                raise ValueError("指标字段与统一口径不一致")
+            for key in expected:
+                compare(actual[key], expected[key])
+        elif not np.isclose(actual, expected, rtol=1e-6, atol=1e-7, equal_nan=True):
+            raise ValueError("指标与保存预测按统一口径重算不一致")
+    compare(metrics, {"normalized": metric_hierarchy(prediction_snapshot["predictions_normalized"], prediction_snapshot["targets_normalized"], names, labels),
+                      "denormalized": metric_hierarchy(prediction_snapshot["predictions"], prediction_snapshot["targets"], names, labels)})
     return manifest, metrics
 
 
@@ -497,4 +537,4 @@ def summarize(roots: list[str | Path]) -> dict:
             group["statistics"] = {key: statistics([row["metrics"]["denormalized"]["overall"][key]
                 for row in group["details"]]) for key in ("pcc", "r2", "mse", "rmse", "mae")}
             group["metric_statistics"] = reduce_metrics([row["metrics"] for row in group["details"]])
-    return {"schema_version": 1, "groups": list(groups.values()), "rejected": rejected}
+    return {"schema_version": 1, "metrics_protocol": "time_adjusted_r2_nan_pcc_v2", "std_ddof": 0, "groups": list(groups.values()), "rejected": rejected}

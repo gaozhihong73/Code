@@ -58,6 +58,11 @@ def prepare_test_data(snp_file, artifacts, pheno_dir=None):
     raw = np.load(snp_file, allow_pickle=False)
     if raw.ndim != 2 or raw.shape[0] != artifacts.split.metadata["n_samples"]:
         raise ValueError("原始 SNP 个体数与保存的 split 不一致；需保持训练时行顺序")
+    # 回放验证训练行未被替换；test SNP 可显式改变，绝不用于重新拟合。
+    from utils.Screening import array_fingerprint
+    recorded = artifacts.metadata.get("training_genotype_sha256")
+    if recorded is not None and array_fingerprint(dosage_to_model_codes(raw[artifacts.split.train_idx])) != recorded:
+        raise ValueError("原始 SNP 训练行内容/顺序与训练指纹不匹配；外部个体请用 --input_snp --input_stage raw")
     test_idx = artifacts.split.test_idx
     if not len(test_idx):
         raise ValueError("保存的 split 没有测试个体")
@@ -69,6 +74,8 @@ def prepare_test_data(snp_file, artifacts, pheno_dir=None):
         blocks = []
         for name in names:
             frame = pd.read_csv(Path(pheno_dir) / f"{name}.csv")
+            if artifacts.metadata.get("time_labels") is not None and list(frame.columns) != artifacts.metadata["time_labels"]:
+                raise ValueError("测试 phenotype 时间列或顺序与训练记录不一致")
             if frame.shape != (len(raw), times):
                 raise ValueError(f"{name}.csv 应有 {len(raw)} 个体、{times} 时间点，且行序与训练一致")
             blocks.append(frame.iloc[test_idx].to_numpy(dtype=np.float32))

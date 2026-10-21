@@ -224,7 +224,7 @@ def plan(spec: ExperimentSpec, *, development_smoke: bool = False) -> list[dict]
                 if file_digest(export_ref.path) != export_ref.sha256:
                     raise ValueError("export metadata 哈希不匹配")
                 export = json.loads(Path(export_ref.path).read_text())
-                if (export["seed"] != unit.seed or export["snp_file_sha256"] != spec.data.snp.sha256
+                if (export.get("paper_eligible") is not True or export["seed"] != unit.seed or export["snp_file_sha256"] != spec.data.snp.sha256
                         or export["phenotype_names"] != unit.traits or export["time_coordinates"] != spec.data.time_coordinates
                         or export["time_labels"] != spec.data.time_labels):
                     raise ValueError("ConvAE export trait set/time 与任务不一致")
@@ -241,7 +241,8 @@ def plan(spec: ExperimentSpec, *, development_smoke: bool = False) -> list[dict]
             if ridge_protocol is not None:
                 ridge_protocol["target_data_refs_sha256"] = ridge_protocol.pop("phenotype_file_sha256")
             method_id = unit.route + (":" + unit.screening_mode if unit.route in ("GWAS", "DC-SIS", "GWAS->DC-SIS") else "")
-            resolved = {"schema_version": 1, "code": code, "development_smoke": development_smoke,
+            resolved = {"schema_version": 1, "metrics_protocol": "time_adjusted_r2_nan_pcc_v2", "std_ddof": 0,
+                "code": code, "development_smoke": development_smoke,
                 "data": spec.data.model_dump(), "split_mode": spec.splits.mode, "split_family_sha256": family_hash,
                 "outer_split": ref.model_dump(), "fold": split.metadata.get("fold_index"),
                 "subset": {"train_idx": subset.train_idx.tolist(), "val_idx": subset.val_idx.tolist(),

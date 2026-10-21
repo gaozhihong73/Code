@@ -239,6 +239,7 @@ class GenotypeTests(unittest.TestCase):
             patch.object(TrainingDosageImputer, "fit") as fit,
         ):
             trainer = TFPPTrainer(TFPPConfig(
+                time_coordinates=[1, 2, 3],
                 snp_file=snp_path, pheno_dir=str(self.root), phenotype_names=["toy"],
                 screen_k=4, gwas_k=4, screen_missing_strategy="mode",
                 use_kfold=True, device="cpu",

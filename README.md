@@ -18,7 +18,7 @@
 
 **基于 Wide-Deep Transformer 的动态基因组选择框架**
 
-DynaGS 提出了一种融合 Legendre 多项式宽通路 (Wide) 与 Transformer 深通路 (Deep) 的基因组选择模型 (TFPP)，通过门控网络自适应融合两条通路的输出，实现对多时间点、多表型动态生长轨迹的高精度预测。
+DynaGS 提出了一种融合 Legendre 多项式宽通路 (Wide) 与 Transformer 深通路 (Deep) 的基因组选择模型 (TFPP)，通过门控网络自适应融合两条通路的输出，用于预测多时间点、多表型动态生长轨迹；真实效果须由固定划分的独立实验评估。
 
 <!-- TODO: 插入模型架构图 -->
 <!-- ![Architecture](docs/architecture.png) -->
@@ -26,7 +26,8 @@ DynaGS 提出了一种融合 Legendre 多项式宽通路 (Wide) 与 Transformer 
 ## 核心亮点
 
 - **Wide-Deep 双通路架构**: 宽通路使用 Legendre 多项式基函数捕捉全局生长趋势，深通路使用 Transformer 编码器建模 SNP 间的非线性交互效应，门控网络动态融合两者。
-- **两阶段 SNP 特征筛选**: GWAS (F 检验) 粗筛 + DC-SIS (距离相关确定独立性筛选) 精筛，将 50000+ 维 SNP 压缩至 informative 子集，大幅降低计算开销。
+- **监督式位点筛选**: GWAS 与 DC-SIS 只使用训练个体标签，返回原始 SNP 列索引；runner 的 `GWAS->DC-SIS` 始终显式串联。
+- **连续表征**: ConvAE 是带可选表型辅助头的 masked autoencoder，导出连续潜在特征供固定 Ridge 探针使用；它不是 SNP 位点筛选，连续 TFPP 第9步仍未实现。
 - **多表型联合预测**: 单次训练同时预测多个表型 (如 RGBVI、GreenCoverage 等) 在全部时间点上的动态曲线。
 - **灵活的消融实验**: 通过 `--ablation_mode` 一键切换完整模型 / 仅 Wide / 仅 Deep / 无门控相加，便于对比分析。
 - **训练产物复用**: 推理严格加载保存的模型配置、划分、筛选索引和 scaler，不重新筛选或拟合。
@@ -424,7 +425,7 @@ outputs/tfpp/{exp_name}/
 > - **P > 50000 (串联模式)**: GWAS (F 检验) 先在全维度粗筛 `gwas_k` 个，DC-SIS 再在 GWAS 候选子集上精筛至 `screen_k` 个，最终结果取 DC-SIS 精选。
 > - **P <= 50000 (并行模式)**: GWAS 和 DC-SIS 各自独立在全维度筛选，最终取两者并集 (互补覆盖)。
 >
-> 多表型时逐表型独立筛选后取并集；筛选结果基于文件哈希自动磁盘缓存。
+> 默认 `screen_multivariate=true` 为多表型联合筛选，显式 false 才逐性状筛选取并集；缓存绑定训练行及其 genotype/phenotype 内容、参数和编码/算法版本，不依赖 test 标签。
 
 #### 损失函数与正则化
 
@@ -714,9 +715,9 @@ summary.json, environment.json, run.log, artifacts.json
 `metrics.json` 同时记录 normalized/denormalized 下的整体、逐表型、逐时间点、
 逐表型逐时间点五项指标。沿用 TFPP 的 `compute_metrics_vectorized()`：
 先时间列均值再按表型等权平均；R² 为时间校正全局 R²，保留负值，不截断。
-仅 PCC 的未定义值处理按本步骤要求调整：常数/近常数列保留 `NaN`，
+第11步已统一公共 TFPP、Ridge 和 runner 的指标协议：常数/近常数列 PCC 保留 `NaN`，
 汇总只对有限 PCC 取均值并记录有效/总列数及有效聚合数；全无效时仍为 `NaN`。
-JSON 使用 Python 可读取的 `NaN`，不会把它替换成0。TFPP 本身的行为没有改变。
+JSON 使用 Python 可读取的 `NaN`，不会替换成0；R² 计算与模型算法未改变。旧报告中的常数 PCC=0 不可直接混入新汇总。
 预测 CSV 以 manifest 的 test sample_id 为第一排序层，其后为 phenotype/time 原序，
 含 sample_id、split/fold 指纹、表型、时间点、原始量纲真实值和预测值。
 
@@ -864,3 +865,74 @@ smoke 将真实合成结果保存在指定目录和 `smoke_summary.json`，不�
 .venv/bin/python -B -m unittest discover -s tests -v
 git diff --check
 ```
+
+## 第11步实验前审计与当前资格
+
+完整报告见 [docs/EXPERIMENT_READINESS.md](docs/EXPERIMENT_READINESS.md)。审计基线为
+`eb326d90fe65068403739ff7c71c183ac018d00e`，第8步与第10步分别独立提交；本次未运行真实数据。
+当前六条 runner 路线均通过 CPU 合成端到端检查。`continuous_feature` TFPP 与未知消融仍明确拒绝。
+
+训练和每折的唯一拟合范围均为当前 train/subset：筛选、众数填补、表型 scaler、Ridge feature scaler。
+val 只早停/选模型或 alpha；test 只有选定模型后的一次正式评估。改变有效的 test 标签不改变
+训练产物、权重、特征或预测；test SNP 变化可以改变对应样本预测，不改变训练期拟合。
+K折的此约束按每一折定义，某折 test 个体可能属于另一折 train，不要求后者模型也保持不变。
+
+普通 TFPP 初始化及 TFPP/ConvAE 的正式训练阶段现在显式使用配置 seed；提前构建其他模型或检查 batch 不改变训练轨迹。TFPP 和 ConvAE CLI 默认值均来自对应 Pydantic 配置；
+`screen_multivariate=true`、`screen_k=gwas_k=10000`、筛选缺失 `error`、Wide 缺失 `mode`、seed=73。
+ConvAE 的数据路径、global 归一化与 TFPP 的默认 residual_global 不必相同，均必须使用同一份明确 split。
+推理不接受重新拟合；其筛选/填补/scaler/input mode 从产物读取。`--screen_multivariate` 仅保留兼容参数。
+
+新增保护与兼容性：
+
+- 完成训练时生成 `models/checkpoint_integrity.json`，绑定权重、模型配置、split、scaler 与预处理；
+  删除或损坏清单/同形状权重会失败，不用 legacy 绕过。
+- 已有 checkpoint 或 test 预约的独立训练目录禁止覆盖；runner 失败后的 test 预约另有独立持久记录，
+  即使 status 回到 count=0 也不能重测。成功 resume 仅校验返回，失败在 test 前才能新 attempt 从头重启。
+- 新 TFPP 记录 CSV 时间列顺序；推理可选标签必须完全同序。测试集回放还核对原始训练 SNP 行指纹。
+  ConvAE 导出核对训练 SNP 内容，编码只收 SNP/mask/ID，绝不调用表型头。
+- 新结果清单必须含 `metrics_protocol=time_adjusted_r2_nan_pcc_v2`、`std_ddof=0` 和 `replay_verified=true`。
+  汇总验证 CSV/NPZ 的身份、fold、数值一致，并按保存预测复核指标；无此审计字段的旧 runner 结果拒绝正式汇总。
+- 完整的旧 schema 2/3 TFPP 产物可作诊断加载，但未封存 checkpoint 的 `paper_eligible=false`；
+  更旧的不完整 checkpoint 仍须 `--legacy`，禁止用于论文。旧 ConvAE v2 未封存产物也仅诊断加载，
+  对应 export 不进入新的 Ridge/runner 正式基线。形状或旧14维裸权重不自动迁移。
+- 格式可读不等于论文资格：历史结果需要当前代码、正确 split、可验证产物与统一指标口径，不能通过补写字段追认。
+
+当前 `sample_id` **只有稳定行索引，没有生物学 ID**。正式 runner 会拒绝与声明 SHA256 不符的数据文件
+及其行/列重排；同一数值文件的生物学身份不能由行索引证明，需要实验者确认来源和样本/位点顺序。
+外部推理有意允许新个体/新 genotype，但必须显式 `raw` 或 `screened`，列顺序必须与训练一致。
+只有测试行的 genotype 改变仍可回放预测，不能据此假称验证了生物学身份。
+
+以下命令的 CLI 和保存加载路径均用临时合成输入实际验证；真实路径/性状/完整时间列必须先准备，
+本审计没有执行这些真实数据模板。重复运行使用新 exp_name，不覆盖已有实验：
+
+```bash
+# 普通 TFPP；跨方法比较请优先使用 runner spec 固定全部数据/划分指纹
+.venv/bin/python -B train.py --exp_name NEW_EXP --split_file <shared.npz> \
+  --snp_file <raw.npy> --pheno_dir <pheno_dir> --pheno_names A B \
+  --time_coordinates 1 2 3 --screen_missing_strategy mode
+
+# K折，生成的 fold manifests 可给 ConvAE 和统一 runner 复用
+.venv/bin/python -B train.py --exp_name NEW_CV --use_kfold true --n_folds 2 \
+  --snp_file <raw.npy> --pheno_dir <pheno_dir> --pheno_names A B \
+  --time_coordinates 1 2 3 --screen_missing_strategy mode
+
+.venv/bin/python -B train_convae.py --exp_name NEW_MAE --split_file <shared_or_fold.npz> \
+  --snp_file <raw.npy> --pheno_dir <pheno_dir> --pheno_names A B --time_coordinates 1 2 3
+.venv/bin/python -B export_convae.py --model_path <MAE_DIR> --split_file <shared_or_fold.npz> --snp_file <raw.npy>
+.venv/bin/python -B ridge_convae.py --export_dir <EXPORT_DIR> --phenotype_file <targets.npz>
+.venv/bin/python -B infer.py --model_path <TFPP_OR_FOLD_DIR> --snp_file <raw.npy> --device cpu --output <new_predictions.csv>
+.venv/bin/python -B run_experiments.py dry-run <spec.json>
+.venv/bin/python -B run_experiments.py run <spec.json>
+.venv/bin/python -B run_experiments.py summarize <run_hash_dir> <another_run_hash_dir>
+
+# 可独立复现的全部合成 CLI/泄漏/回放检查，无需真实数据
+.venv/bin/python -B -m unittest discover -s tests -p test_readiness.py -v
+.venv/bin/python -B run_experiments.py smoke --directory /tmp/dynags_step11_smoke
+.venv/bin/python -B run_experiments.py dry-run /tmp/dynags_step11_smoke/spec.json --development-smoke
+.venv/bin/python -B -m unittest discover -s tests -v
+git diff --check
+```
+
+审计已验证152项完整测试。CPU 合成通过代表实现与产物链可用，不代表真实预测性能、GPU 数值一致性或大数据资源预算已验证。
+正式实验前需固定真实文件 SHA256、实际 N/P、完整时间列/坐标、trait set、共享普通 split 或完整 folds、
+train-size 计划和独立输出根目录；提交代码并保持 clean 后再启动。保留 spec、所有产物、每折明细和指标有效计数。

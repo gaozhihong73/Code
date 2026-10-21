@@ -234,12 +234,21 @@ class TFPPDataset:
         pheno_data : np.ndarray
             合并后的表型数据，形状为 ``(n_sample, n_pheno, n_time_points)``。
         """
+        if not self.phenotype_names or len(set(self.phenotype_names)) != len(self.phenotype_names):
+            raise ValueError("phenotype_names 必须非空且唯一")
         phenotypes = []
+        self.time_labels = None
 
         # 遍历每个表型文件
         for phenotype_name in self.phenotype_names:
             phenotype = pd.read_csv(Path(f"{self.pheno_dir}/{phenotype_name}.csv"))
+            labels = list(phenotype.columns)
+            if self.time_labels is not None and labels != self.time_labels:
+                raise ValueError("各表型 CSV 时间列及顺序必须一致")
+            self.time_labels = labels
             phenotype = phenotype.values[:, np.newaxis, :].astype(np.float32)
+            if not phenotype.size or not np.isfinite(phenotype).all():
+                raise ValueError("原始 phenotype 必须非空且有限；缺失策略为 error")
             phenotypes.append(phenotype)
 
         # 合并所有表型数据: [n_sample, n_pheno, n_time_points]

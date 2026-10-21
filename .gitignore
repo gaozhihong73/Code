@@ -55,7 +55,8 @@ ENV/
 
 # 其它
 data/
-docs/
+docs/*
+!docs/EXPERIMENT_READINESS.md
 .opencode/
 .workbuddy/
 .qoder/

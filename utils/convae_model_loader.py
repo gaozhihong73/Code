@@ -30,6 +30,7 @@ def load_convae_model(path: str | Path, device: str = "cpu") -> tuple[ConvAE, di
     config_path = root / "config.json"
     config = ConvAEConfig.model_validate_json(config_path.read_text(encoding="utf-8"))
     model_config, metadata = package["model_config"], package["metadata"]
+    from .ArtifactIntegrity import CHECKPOINT_PROTOCOL, verify_checkpoint
     for name, expected in (("model_config.json", model_config), ("checkpoint_metadata.json", metadata)):
         sidecar = checkpoint.parent / name
         if not sidecar.is_file():
@@ -85,6 +86,8 @@ def load_convae_model(path: str | Path, device: str = "cpu") -> tuple[ConvAE, di
         if (not np.array_equal(ids, saved["sample_ids"])
                 or not np.array_equal(expected_masks, saved["patch_masks"])):
             raise ValueError("ConvAE 验证掩码与 seed/split/sample_id 不一致")
+    if metadata.get("checkpoint_protocol") == CHECKPOINT_PROTOCOL or (root / "models/checkpoint_integrity.json").exists():
+        verify_checkpoint(root)
     parameters = {key: value for key, value in model_config.items() if key != "model_version"}
     model = ConvAE(**parameters).to(device)
     try:
@@ -92,4 +95,5 @@ def load_convae_model(path: str | Path, device: str = "cpu") -> tuple[ConvAE, di
     except RuntimeError as error:
         raise ValueError("ConvAE 权重形状或辅助头开关不匹配；禁止静默迁移，请使用匹配的 v2 配置") from error
     model.eval()
-    return model, {"model_config": model_config, "metadata": metadata, "artifacts": artifacts}
+    return model, {"model_config": model_config, "metadata": metadata, "artifacts": artifacts,
+                   "paper_eligible": metadata.get("checkpoint_protocol") == CHECKPOINT_PROTOCOL}

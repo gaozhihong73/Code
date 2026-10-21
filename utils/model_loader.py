@@ -171,6 +171,11 @@ def load_tfpp_model(
         if saved_config is None:
             raise FileNotFoundError("新格式实验缺少 models/model_config.json，禁止从权重猜测配置")
         artifacts = load_inference_artifacts(model_dir, saved_config)
+        from .ArtifactIntegrity import CHECKPOINT_PROTOCOL, verify_checkpoint
+        if (artifacts.metadata.get("checkpoint_protocol") == CHECKPOINT_PROTOCOL
+                or (model_dir / "models/checkpoint_integrity.json").exists()
+                or (model_dir / "test_evaluation.json").exists()):
+            verify_checkpoint(model_dir)
         for key in ("snp_dim", "d_model", "num_layers", "d_ff", "num_embeddings", "degree", "time_points"):
             if saved_config.get(key) != inferred.get(key):
                 raise ValueError(f"checkpoint 与 model_config 不一致: {key}")
@@ -268,7 +273,7 @@ def load_tfpp_model(
         "config_source": "model_config.json" if saved_config else "state_dict_inference",
         "artifacts": artifacts,
         "legacy": not is_new,
-        "paper_eligible": is_new,
+        "paper_eligible": bool(is_new and artifacts.metadata.get("checkpoint_protocol") == "checkpoint_sha256_v1"),
     }
 
     if verbose:

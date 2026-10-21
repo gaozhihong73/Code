@@ -38,6 +38,13 @@ def train_one():
         parser.add_argument(f"--{name}", type=int, default=ConvAEConfig.model_fields[name].default)
     for name in ("train_mask_ratio", "val_mask_ratio", "dropout"):
         parser.add_argument(f"--{name}", type=float, default=ConvAEConfig.model_fields[name].default)
+    aliases = {"pheno_names": "phenotype_names"}
+    defaults = {}
+    for action in parser._actions:
+        field = ConvAEConfig.model_fields.get(aliases.get(action.dest, action.dest))
+        if field is not None and action.dest not in ("exp_name", "recon_weight", "pheno_weight"):
+            defaults[action.dest] = field.get_default(call_default_factory=True)
+    parser.set_defaults(**defaults)
     args = parser.parse_args()
     options = {key: getattr(args, key) for key in
                ("split_file", "snp_file", "pheno_dir", "chunk_size", "overlap", "seed", "time_coordinates", "output_root")}
@@ -50,12 +57,10 @@ def train_one():
                      "encoder_layers", "decoder_layers", "train_mask_ratio", "val_mask_ratio", "dropout")})
     config = ConvAEConfig(
         epochs=args.epochs,
-        lr=0.0001,
-        weight_decay=1e-4,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        recon_weight=args.recon_weight if args.recon_weight is not None else (0.7 if args.use_pheno_help else 1.0),
-        pheno_weight=args.pheno_weight if args.pheno_weight is not None else (0.3 if args.use_pheno_help else 0.0),
+        recon_weight=args.recon_weight if args.recon_weight is not None else (ConvAEConfig.model_fields["recon_weight"].default if args.use_pheno_help else 1.0),
+        pheno_weight=args.pheno_weight if args.pheno_weight is not None else (ConvAEConfig.model_fields["pheno_weight"].default if args.use_pheno_help else 0.0),
         phenotype_names=args.pheno_names,
         **options,
     )

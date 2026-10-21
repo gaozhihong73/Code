@@ -315,6 +315,8 @@ class ConvAEModelTests(unittest.TestCase):
         key = "phenotype_head.3.weight"
         package["state_dict"][key] = torch.zeros(14, 128)
         torch.save(package, checkpoint)
+        from utils.ArtifactIntegrity import seal_checkpoint
+        seal_checkpoint(trainer.config.output_dir, extra_files=("config.json", "preprocessing/validation_masks.npz", "models/checkpoint_metadata.json"))
         with self.assertRaisesRegex(ValueError, "权重形状"):
             load_convae_model(trainer.config.output_dir)
 

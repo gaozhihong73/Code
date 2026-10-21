@@ -112,6 +112,7 @@ def save_convae_preprocessing(dataset, data, config, *, split_source=None) -> di
         "sample_ids_sha256": saved.metadata["sample_ids_sha256"],
         "train_indices_sha256": training_indices_hash(saved.train_idx),
         "train_phenotype_sha256": train_fingerprint,
+        "train_genotype_sha256": array_fingerprint(dataset.snp[data.split.train_idx, :dataset.original_length].numpy()),
         "fold_metadata": _fold_metadata(saved),
         "scaler_sha256": file_sha256(scaler_path),
         "padding_mask_sha256": file_sha256(prep / "padding_mask.npy"),
@@ -211,6 +212,8 @@ def load_convae_preprocessing(root: str | Path, *, dataset=None, config=None) ->
             raise ValueError("当前 ConvAE 数据的个体顺序、表型/时间点或有效长度/chunk 参数不一致")
         if array_fingerprint(dataset.phenotype[split.train_idx]) != meta["train_phenotype_sha256"]:
             raise ValueError("ConvAE train phenotype 指纹已变化，请使用新的 exp_name")
+        if meta.get("train_genotype_sha256") is not None and array_fingerprint(dataset.snp[split.train_idx, :length].numpy()) != meta["train_genotype_sha256"]:
+            raise ValueError("ConvAE train genotype 内容/顺序已变化，请使用新的 exp_name")
     if config is not None:
         for key in ("phenotype_names", "time_coordinates", "chunk_size", "overlap", "phenotype_missing_strategy"):
             if getattr(config, key) != meta[key]:

@@ -2,7 +2,7 @@
 
 本模块定义 ConvAEConfig (Pydantic BaseModel)，管理现有 masked autoencoder 训练所需的
 超参数、数据路径和输出目录。ConvAE 用于将高维 SNP 数据压缩为低维潜在表示，
-压缩结果可供下游 TFPP 模型使用。
+当前压缩结果仅支持独立 Ridge 下游基线；continuous_feature TFPP 尚未实现。
 """
 
 from datetime import datetime

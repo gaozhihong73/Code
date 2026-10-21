@@ -69,6 +69,9 @@ class TFPPTrainer:
         """初始化训练器并构建数据集与模型。"""
         # 保存配置
         self.config = config
+        existing = Path(config.output_dir)
+        if (existing / "models/best_model.pt").exists() or (existing / "test_evaluation.json").exists():
+            raise FileExistsError("实验已有 checkpoint/test 预约，禁止覆盖或再次观察 test；请使用新实验目录或 runner --resume")
 
         # 保存目录参数
         self.pheno_dir = self.config.pheno_dir
@@ -92,6 +95,8 @@ class TFPPTrainer:
         self.phenotype_names = config.phenotype_names
         self.dataset = self._create_dataset()
         self.num_sample = len(self.dataset)
+        if self.dataset.phenotype.shape[2] != len(config.time_coordinates):
+            raise ValueError("phenotype 时间列数必须与 time_coordinates 一致")
         self.train_ratio = config.train_ratio
         self.val_ratio = config.val_ratio
         self.test_ratio = config.test_ratio
@@ -167,6 +172,7 @@ class TFPPTrainer:
             self.model = None
         else:
             self._prepare_regular_data()
+            torch.manual_seed(config.seed)
             self.model = self._create_model()
 
     def _prepare_regular_data(self):
@@ -302,6 +308,7 @@ class TFPPTrainer:
             "snp_dim": self.snp_dim,
             "phenotype_names": self.phenotype_names,
             "time_coordinates": self.config.time_coordinates,
+            "time_labels": getattr(self.dataset, "time_labels", None),
             "screened_indices_sha256": hashlib.sha256(
                 (artifacts / "screened_indices.npy").read_bytes()
             ).hexdigest(),
@@ -586,6 +593,9 @@ class TFPPTrainer:
         dict[str, Any]
             包含归一化和反归一化两组评估结果的字典。
         """
+        reservation = Path(self.config.output_dir) / "test_evaluation.json"
+        with reservation.open("x", encoding="utf-8") as handle:
+            json.dump({"test_evaluation_count": 1, "train_indices_sha256": self.train_indices_sha256}, handle)
         self.model.eval()
         all_preds = []
         all_targets = []
@@ -691,6 +701,9 @@ class TFPPTrainer:
         # 输出配置信息
         self._log_configuration()
 
+        if (Path(self.config.output_dir) / "test_evaluation.json").exists():
+            raise ValueError("test 已预约/评估，禁止重新训练后重测")
+        torch.manual_seed(self.seed)  # 训练 RNG 不依赖其他实例或外部探查消耗。
         start_time = time.time()
 
         # 初始化时已固定划分并只用训练个体完成筛选和 scaler 拟合，不能再次划分。
@@ -735,6 +748,9 @@ class TFPPTrainer:
             avg_val_loss, val_pheno_metrics, val_metrics = self._validate_epoch(
                 val_loader, criterion
             )
+
+            if not np.isfinite(avg_val_loss):
+                raise ValueError("验证损失非有限，禁止保存初始/未选择模型或评估 test")
 
             # 记录损失历史
             train_loss_history.append(avg_train_loss)
@@ -955,6 +971,12 @@ class TFPPTrainer:
             with open(_cfg_path, "w", encoding="utf-8") as _f:
                 json.dump(_mc, _f, ensure_ascii=False, indent=2)
 
+        from utils.ArtifactIntegrity import CHECKPOINT_PROTOCOL, seal_checkpoint
+        self.preprocessing_metadata["checkpoint_protocol"] = CHECKPOINT_PROTOCOL
+        Path(self.config.preprocessing_save_dir, "preprocessing.json").write_text(
+            json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        seal_checkpoint(self.config.output_dir, extra_files=("test_evaluation.json", "preprocessing/screened_indices.npy"))
+
         # ==========================================
         # 2. 保存训练摘要与配置元数据 (.json)
         # ==========================================
@@ -1155,9 +1177,15 @@ class TFPPTrainer:
                     trainer.logger.logger.removeHandler(handler)
                 del trainer
         def stats(metrics):
-            return {key: {"mean": float(np.mean(values)), "std": float(np.std(values)),
-                          "values": values} for key, values in metrics.items()}
+            output = {}
+            for key, values in metrics.items():
+                valid = np.asarray(values)[np.isfinite(values)]
+                output[key] = {"mean": float(valid.mean()) if len(valid) else float("nan"),
+                               "std": float(valid.std(ddof=0)) if len(valid) else float("nan"),
+                               "valid_count": int(len(valid)), "values": values}
+            return output
         summary = {
+            "metrics_protocol": "time_adjusted_r2_nan_pcc_v2",
             "n_folds": self.n_folds, "outer_seed": self.seed,
             "kfold_val_ratio": self.config.kfold_val_ratio,
             "fold_results": fold_results, "overall_denorm_metrics": all_metrics,

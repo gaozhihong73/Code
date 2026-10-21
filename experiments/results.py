@@ -23,6 +23,9 @@ class CodeIdentity(BaseModel):
 
 
 class ResultManifest(BaseModel):
+    metrics_protocol: Literal["time_adjusted_r2_nan_pcc_v2"]
+    std_ddof: Literal[0]
+    replay_verified: Literal[True]
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1]
     config_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

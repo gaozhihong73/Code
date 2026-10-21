@@ -35,7 +35,7 @@ def baseline_config(seed: int, phenotype_sha256: str) -> dict:
     """固定模型/归一化/选择口径；不提供扩大搜索范围的参数。"""
     if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
         raise ValueError("seed 必须为非负整数")
-    return {"schema_version": 1, "description": "ConvAE 表征的独立线性探针/下游基线",
+    return {"schema_version": 1, "metrics_protocol": "time_adjusted_r2_nan_pcc_v2", "std_ddof": 0, "description": "ConvAE 表征的独立线性探针/下游基线",
             "seed": seed, "model": "multioutput_Ridge", "fit_intercept": True,
             "solver": "lsqr", "tol": 1e-6, "max_iter": 10000, "alphas": list(ALPHAS),
             "selection": "normalized_overall_val_mse", "tie_break": "larger_alpha",
@@ -62,6 +62,8 @@ def load_probe_export(export_dir: str | Path, split_file: str | Path | None = No
                 "preprocessing_schema_version", "encoder_only", "reconstruction_mask_ratio", "seed",
                 "num_chunks", "d_ext", "latent_dim", "sample_ids_sha256", "sample_id_source",
                 "preprocessing_sha256", "genotype_encoding_version", "snp_file_sha256"}
+    if meta.get("paper_eligible") is not True:
+        raise ValueError("旧/未封存 ConvAE export 不具备正式结果资格；请使用当前严格 checkpoint 重新导出")
     if not required.issubset(meta) or meta["preprocessing_schema_version"] != 3:
         raise ValueError("导出 metadata 缺少 schema 3 来源字段")
     if (meta["latent_layout"] != LATENT_LAYOUT or meta["encoder_only"] is not True
@@ -181,27 +183,11 @@ def predict_probe(package: dict, features: np.ndarray) -> tuple[np.ndarray, np.n
 
 
 def _metric_block(pred: np.ndarray, target: np.ndarray) -> dict:
-    result = compute_metrics_vectorized(pred, target)
-    centered_pred = pred - pred.mean(axis=0)
-    centered_target = target - target.mean(axis=0)
-    denominator = np.sqrt((centered_pred ** 2).sum(axis=0) * (centered_target ** 2).sum(axis=0))
-    valid = denominator >= 1e-10  # 与 TFPP 相同的常数/近常数判定阈值。
-    pcc = np.full(pred.shape[1], np.nan)
-    np.divide((centered_pred * centered_target).sum(axis=0), denominator, out=pcc, where=valid)
-    result["pcc"] = float(pcc[valid].mean()) if valid.any() else float("nan")
-    result.update(pcc_valid_count=int(valid.sum()), pcc_total_count=len(valid))
-    return result
+    return compute_metrics_vectorized(pred, target)
 
 
 def _average_blocks(blocks: dict) -> dict:
-    result = calculate_metrics_by_average({name: {key: value[key] for key in METRICS}
-                                           for name, value in blocks.items()})
-    valid = [block["pcc"] for block in blocks.values() if math.isfinite(block["pcc"])]
-    result["pcc"] = float(np.mean(valid)) if valid else float("nan")
-    result["pcc_valid_count"] = sum(block["pcc_valid_count"] for block in blocks.values())
-    result["pcc_total_count"] = sum(block["pcc_total_count"] for block in blocks.values())
-    result["pcc_valid_aggregate_count"] = len(valid)
-    return result
+    return calculate_metrics_by_average(blocks)
 
 
 def metric_hierarchy(pred: np.ndarray, target: np.ndarray, names: list[str], time_labels: list[str]) -> dict:

@@ -143,6 +143,8 @@ class ConvAETrainer:
         tag = "split" if fold is None else f"fold_{fold:02d}"
         tag += "_" + fingerprint[:16]
         self.config = config.model_copy(update={"split_tag": tag})
+        if Path(self.config.best_model_save_dir, "best_model.pt").exists():
+            raise FileExistsError("ConvAE 最佳 checkpoint 已存在，禁止覆盖；请使用新的 exp_name")
         self.data_pipeline = data
         self.split, self.scalers = data.split, data.scalers
         self.train_loader, self.val_loader, self.test_loader = (
@@ -295,6 +297,12 @@ class ConvAETrainer:
         """只用固定 val 掩码和预先指定的选择指标早停，test 不参与模型选择。"""
         if self.model is None:
             raise ValueError("initialize_model=False 仅准备数据管线，不能训练；请显式初始化模型")
+        if (self.best_model_save_dir / "best_model.pt").exists():
+            raise FileExistsError("ConvAE checkpoint 已存在，禁止重复训练覆盖")
+        torch.manual_seed(self.seed)
+        self.train_mask_generator.manual_seed(self.seed)
+        if self.train_loader.generator is not None:
+            self.train_loader.generator.manual_seed(self.seed)
         self._log_configuration()
         self.logger.info(f"模型选择固定为 {self.selection_metric}，mask_policy={MASK_POLICY}")
         optimizer, scheduler = self._create_optimizer_and_scheduler()
@@ -342,6 +350,7 @@ class ConvAETrainer:
         index = best_epoch - 1
         metadata = {
             "schema_version": 3, "model_version": MODEL_VERSION,
+            "checkpoint_protocol": "checkpoint_sha256_v1",
             "selection_metric": self.selection_metric, "use_pheno_help": self.use_pheno_help,
             "selection_definition": self.config.selection_definition,
             "reconstruction_loss_definition": self.config.reconstruction_loss_definition,
@@ -370,6 +379,8 @@ class ConvAETrainer:
         (self.training_history_save_dir / "training_summary.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         pd.DataFrame(history).to_csv(self.training_history_save_dir / "training_history.csv", index=False)
+        from utils.ArtifactIntegrity import seal_checkpoint
+        seal_checkpoint(self.config.output_dir, extra_files=("config.json", "preprocessing/validation_masks.npz", "models/checkpoint_metadata.json"))
 
     def _compress_data(self, best_model_state: dict[str, Any]):
         """禁止旧的全量压缩入口绕过严格 checkpoint 和 split 校验。"""

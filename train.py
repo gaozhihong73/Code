@@ -11,6 +11,8 @@ from trainer import TFPPTrainer
 
 def _str_to_bool(s: str) -> bool:
     """将 'true'/'false' 字符串正确解析为布尔值，避免 argparse type=bool 的陷阱。"""
+    if s.strip().lower() not in ("true", "false"):
+        raise argparse.ArgumentTypeError("请显式使用 true 或 false")
     return s.strip().lower() == "true"
 
 
@@ -191,7 +193,7 @@ def parse_args():
         help=(
             "GWAS (全基因组关联分析) 筛选保留的 SNP 数目。"
             "使用向量化 F 检验快速粗筛高维 SNP。"
-            "两阶段流程: 先 GWAS 粗筛, 再在子集上 DC-SIS 精筛。"
+            "普通入口按生产筛选策略：P>50000串联，否则两者并集；严格串联请用统一 runner。"
             "0=跳过此步骤"
         ),
     )
@@ -353,6 +355,14 @@ def parse_args():
         help="每折外层 train 中划给早停 val 的比例；test 仅最终评分",
     )
 
+    # 配置是默认值唯一来源，避免 CLI 副本随配置漂移。
+    aliases = {"pheno_names": "phenotype_names", "is_save": "is_save_training_info"}
+    defaults = {}
+    for action in parser._actions:
+        field = TFPPConfig.model_fields.get(aliases.get(action.dest, action.dest))
+        if field is not None and action.dest != "exp_name":
+            defaults[action.dest] = field.get_default(call_default_factory=True)
+    parser.set_defaults(**defaults)
     return parser.parse_args()
 
 

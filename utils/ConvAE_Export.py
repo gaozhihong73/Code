@@ -166,6 +166,10 @@ def export_convae_features(model_path: str | Path, *, split_file: str | Path,
     destination = base / meta["split_fingerprint"] / checkpoint_hash / data_hash
     if destination.exists():
         raise FileExistsError(f"导出目录已存在，禁止覆盖；复现实验请指定不同 --output_root: {destination}")
+    from .Screening import array_fingerprint
+    expected_train = meta.get("train_genotype_sha256")
+    if expected_train is not None and array_fingerprint(dosage_to_model_codes(dosage[split.train_idx]).astype(np.int64)) != expected_train:
+        raise ValueError("ConvAE 导出 train genotype 内容/顺序与 checkpoint 不一致")
     features, ids_by_role = {}, {}
     for role in ROLES:
         indices = getattr(split, role + "_idx")
@@ -193,6 +197,7 @@ def export_convae_features(model_path: str | Path, *, split_file: str | Path,
                 "files": {name: file_sha256(directory / name) for name in (f"{role}.npy", f"{role}_sample_ids.npy")}}
         metadata = {
             "export_schema_version": EXPORT_SCHEMA, **_git_provenance(),
+            "paper_eligible": info["paper_eligible"],
             "preprocessing_schema_version": meta["schema_version"],
             "preprocessing_sha256": info["metadata"]["preprocessing_sha256"],
             "split_file": str(split_file), "split_sha256": meta["split_sha256"],

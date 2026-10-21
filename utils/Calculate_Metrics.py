@@ -1,6 +1,9 @@
 import numpy as np
 import torch
 
+METRICS_PROTOCOL = "time_adjusted_r2_nan_pcc_v2"
+STD_DDOF = 0
+
 
 def compute_metrics_vectorized(
     pred: np.ndarray, target: np.ndarray
@@ -43,7 +46,7 @@ def compute_metrics_vectorized(
     denom_zero_mask = denominator < 1e-10
     safe_denom = np.where(denom_zero_mask, 1.0, denominator)
     pcc_per_col = numerator / safe_denom
-    pcc_per_col = np.where(denom_zero_mask, 0.0, pcc_per_col)
+    pcc_per_col = np.where(denom_zero_mask, np.nan, pcc_per_col)
 
     # ---------------- [核心修正] ----------------
     # 3. R2 Score (Time-Adjusted Global R2)
@@ -71,7 +74,9 @@ def compute_metrics_vectorized(
         "mse": float(np.nanmean(mse_per_col)),
         "rmse": float(np.nanmean(rmse_per_col)),
         "mae": float(np.nanmean(mae_per_col)),
-        "pcc": float(np.nanmean(pcc_per_col)),
+        "pcc": float(np.nanmean(pcc_per_col)) if (~denom_zero_mask).any() else float("nan"),
+        "pcc_valid_count": int((~denom_zero_mask).sum()),
+        "pcc_total_count": int(len(denom_zero_mask)),
         "r2": float(r2_final),  # 这是真正反映育种预测能力的 R2
     }
 
@@ -129,13 +134,13 @@ def calculate_metrics_by_average(
     if not phenotype_metrics:
         return {}
 
-    # 获取第一个表型的 key 作为参考 (例如 mse, pcc, r2, spearman)
-    first_key = next(iter(phenotype_metrics))
-    metric_keys = phenotype_metrics[first_key].keys()
-
+    metric_keys = ("mse", "rmse", "mae", "pcc", "r2")
     overall_metrics = {}
     for key in metric_keys:
-        values = [m[key] for m in phenotype_metrics.values()]
-        overall_metrics[key] = float(np.mean(values))
-
+        values = np.asarray([m[key] for m in phenotype_metrics.values()])
+        finite = values[np.isfinite(values)]
+        overall_metrics[key] = float(finite.mean()) if len(finite) else float("nan")
+    overall_metrics["pcc_valid_count"] = sum(m.get("pcc_valid_count", int(np.isfinite(m["pcc"]))) for m in phenotype_metrics.values())
+    overall_metrics["pcc_total_count"] = sum(m.get("pcc_total_count", 1) for m in phenotype_metrics.values())
+    overall_metrics["pcc_valid_aggregate_count"] = sum(int(np.isfinite(m["pcc"])) for m in phenotype_metrics.values())
     return overall_metrics
