@@ -1,4 +1,6 @@
+import hashlib
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -26,8 +28,18 @@ from utils import (
     save_model_config,
     save_scalers,
 )
-from utils.Split import load_or_create_split
-from utils.Genotype import model_codes_to_dosage, prepare_screening_dosage
+from utils.Genotype import (
+    GENOTYPE_ENCODING_VERSION,
+    TrainingDosageImputer,
+    model_codes_to_dosage,
+    prepare_screening_dosage,
+)
+from utils.Screening import (
+    SCREENING_ALGORITHM_VERSION,
+    array_fingerprint,
+    training_indices_hash,
+)
+from utils.Split import default_split_path, load_or_create_split
 
 
 class TFPPTrainer:
@@ -88,7 +100,7 @@ class TFPPTrainer:
         self.log_file = self.config.log_file
         self.logger = Logger(self.log_file, unique=False)
 
-        # SNP 特征筛选（在划分前对全量数据执行，筛选后再创建模型）
+        # 普通训练先划分再筛选；K折暂保留旧路径。
         self.screen_k = config.screen_k
         self.gwas_k = config.gwas_k
         self.screen_multivariate = config.screen_multivariate
@@ -97,35 +109,10 @@ class TFPPTrainer:
             f"筛选配置: screen_multivariate={self.screen_multivariate}, "
             f"screen_missing_strategy={self.screen_missing_strategy}"
         )
-        if self.screen_k > 0 or self.gwas_k > 0:
-            from utils import compute_cache_key, screen_snps
-
-            cache_key = compute_cache_key(
-                snp_file=self.snp_file,
-                pheno_source=self.pheno_dir,
-                phenotype_names=self.phenotype_names,
-                screen_k=self.screen_k,
-                gwas_k=self.gwas_k,
-                seed=self.seed,
-                multivariate=self.screen_multivariate,
-                missing_strategy=self.screen_missing_strategy,
-            )
-            screened_idx = screen_snps(
-                prepare_screening_dosage(
-                    model_codes_to_dosage(self.dataset.snp),
-                    missing_strategy=self.screen_missing_strategy,
-                ),
-                self.dataset.phenotype,
-                screen_k=self.screen_k,
-                gwas_k=self.gwas_k,
-                multivariate=self.screen_multivariate,
-                cache_key=cache_key,
-                logger=self.logger,
-            )
-            if screened_idx is not None:
-                self.dataset.snp = self.dataset.snp[:, screened_idx]
-
-        self.snp_dim: int = self.dataset.snp.shape[1]
+        self.use_kfold = config.use_kfold
+        self.n_folds = config.n_folds
+        self.original_snp_dim = self.dataset.snp.shape[1]
+        self.wide_fill_values = None
 
         # 训练超参数
         self.epochs = config.epochs
@@ -169,12 +156,199 @@ class TFPPTrainer:
         self.ablation_mode = config.ablation_mode
         self.time_coordinates = config.time_coordinates
 
-        # 模型初始化
+        # 先固定输入维度和训练期预处理，再初始化模型。
+        if self.use_kfold:
+            self._screen_legacy_kfold()
+        else:
+            self._prepare_regular_data()
         self.model = self._create_model()
 
-        # K折交叉验证参数
-        self.use_kfold = config.use_kfold
-        self.n_folds = config.n_folds
+    def _screen_legacy_kfold(self):
+        """仅隔离旧K折逻辑：全体表型筛选泄漏尚未在本步修复。"""
+        if self.screen_k > 0 or self.gwas_k > 0:
+            from utils import compute_cache_key, screen_snps
+
+            cache_key = compute_cache_key(
+                self.snp_file,
+                self.pheno_dir,
+                self.phenotype_names,
+                self.screen_k,
+                self.gwas_k,
+                self.seed,
+                multivariate=self.screen_multivariate,
+                missing_strategy=self.screen_missing_strategy,
+            )
+            indices = screen_snps(
+                prepare_screening_dosage(
+                    model_codes_to_dosage(self.dataset.snp),
+                    missing_strategy=self.screen_missing_strategy,
+                ),
+                self.dataset.phenotype,
+                screen_k=self.screen_k,
+                gwas_k=self.gwas_k,
+                multivariate=self.screen_multivariate,
+                cache_key=cache_key,
+                logger=self.logger,
+            )
+            if indices is not None:
+                self.dataset.snp = self.dataset.snp[:, indices]
+        self.snp_dim = self.dataset.snp.shape[1]
+
+    def _prepare_regular_data(self):
+        """所有依赖标签的拟合只接收固定 train_idx，模型输入始终保留缺失类别0。"""
+        from utils import compute_cache_key, screen_snps
+
+        ratios = (self.train_ratio, self.val_ratio, self.test_ratio)
+        split_path = self.config.split_file
+        if split_path is None or split_path == "auto":
+            split_path = default_split_path(
+                self.num_sample, ratios=ratios, seed=self.seed
+            )
+        self.split = load_or_create_split(
+            split_path, self.num_sample, ratios=ratios, seed=self.seed
+        )
+        train_idx = self.split.train_idx
+        if min(len(train_idx), len(self.split.val_idx), len(self.split.test_idx)) == 0:
+            raise ValueError("普通训练要求 train/val/test 均非空")
+        self.logger.info(
+            f"固定划分: {split_path}, seed={self.split.metadata['seed']}, "
+            f"比例={self.split.metadata['ratios']}, sample_id_source=row_index"
+        )
+        # 只提取训练行；不对完整 phenotype 做统计或建立标签相关指纹。
+        train_codes = self.dataset.snp[train_idx]
+        train_phenotype = self.dataset.phenotype[train_idx]
+        train_dosage = model_codes_to_dosage(train_codes)
+        self.train_indices_sha256 = training_indices_hash(train_idx)
+        self.screening_cache_key = compute_cache_key(
+            self.snp_file,
+            self.pheno_dir,
+            self.phenotype_names,
+            self.screen_k,
+            self.gwas_k,
+            self.seed,
+            split_info="regular:" + self.split.metadata["sample_ids_sha256"],
+            multivariate=self.screen_multivariate,
+            missing_strategy=self.screen_missing_strategy,
+            train_indices=train_idx,
+            train_genotype=train_codes,
+            train_phenotype=train_phenotype,
+        )
+        screening_imputer = None
+        selected = None
+        if self.screen_k > 0 or self.gwas_k > 0:
+            if self.screen_missing_strategy == "mode":
+                screening_imputer = TrainingDosageImputer("mode").fit(
+                    train_dosage, train_idx=np.arange(len(train_idx), dtype=np.int64)
+                )
+                # fit 的输入已是训练子矩阵，同时记录原始行号用于追溯。
+                screening_imputer.metadata_["original_train_idx"] = train_idx.tolist()
+            selected = screen_snps(
+                prepare_screening_dosage(
+                    train_dosage,
+                    missing_strategy=self.screen_missing_strategy,
+                    imputer=screening_imputer,
+                ),
+                train_phenotype,
+                screen_k=self.screen_k,
+                gwas_k=self.gwas_k,
+                multivariate=self.screen_multivariate,
+                cache_key=self.screening_cache_key,
+                cache_dir=self.config.screen_cache_dir,
+                logger=self.logger,
+            )
+        self.screened_indices = (
+            np.arange(self.original_snp_dim)
+            if selected is None
+            else np.asarray(selected)
+        )
+        if (
+            self.screened_indices.ndim != 1
+            or self.screened_indices.dtype.kind not in "iu"
+            or not self.screened_indices.size
+            or np.unique(self.screened_indices).size != self.screened_indices.size
+            or (self.screened_indices < 0).any()
+            or (self.screened_indices >= self.original_snp_dim).any()
+        ):
+            raise ValueError("筛选缓存/结果不是有效的原始 SNP 列索引")
+        self.screened_indices = self.screened_indices.astype(np.int64)
+        self.dataset.snp = self.dataset.snp[:, self.screened_indices]
+        self.snp_dim = self.dataset.snp.shape[1]
+
+        # Wide 拟合独立于标签，且不将筛选的填补结果写回 Deep 类别矩阵。
+        wide_metadata = {"strategy": self.config.wide_missing_strategy}
+        if self.config.wide_missing_strategy == "mode":
+            wide_imputer = TrainingDosageImputer("mode").fit(
+                model_codes_to_dosage(self.dataset.snp), train_idx=train_idx
+            )
+            self.wide_fill_values = wide_imputer.fill_values_.copy()
+            wide_metadata = wide_imputer.metadata_
+        else:
+            prepare_screening_dosage(train_dosage[:, self.screened_indices])
+
+        self.train_loader, self.val_loader, self.test_loader, self.scalers = (
+            get_dataloader(
+                self.dataset,
+                self.batch_size,
+                self.norm_method,
+                self.scaler_type,
+                device=self.device,
+                num_workers=self.num_workers,
+                indices=self.split,
+            )
+        )
+        save_scalers(self.scalers, self.scaler_file)
+        artifacts = Path(self.config.preprocessing_save_dir)
+        artifacts.mkdir(parents=True, exist_ok=True)
+        copied_split = artifacts / "split.npz"
+        if Path(split_path).resolve() != copied_split.resolve():
+            shutil.copyfile(split_path, copied_split)
+        split_sha256 = hashlib.sha256(copied_split.read_bytes()).hexdigest()
+        np.save(artifacts / "screened_indices.npy", self.screened_indices)
+        self.preprocessing_metadata = {
+            "schema_version": 2,
+            "training_mode": "regular",
+            "split_source": str(Path(split_path).resolve()),
+            "split_copy": "split.npz",
+            "split_sha256": split_sha256,
+            "split_seed": self.split.metadata["seed"],
+            "split_ratios": self.split.metadata["ratios"],
+            "sample_id_source": self.split.metadata["sample_id_source"],
+            "sample_ids_sha256": self.split.metadata["sample_ids_sha256"],
+            "train_indices_sha256": self.train_indices_sha256,
+            "original_snp_dim": self.original_snp_dim,
+            "snp_dim": self.snp_dim,
+            "phenotype_names": self.phenotype_names,
+            "screen_k": self.screen_k,
+            "gwas_k": self.gwas_k,
+            "screen_multivariate": self.screen_multivariate,
+            "screen_missing_strategy": self.screen_missing_strategy,
+            "screening_cache_key": self.screening_cache_key,
+            "training_genotype_sha256": array_fingerprint(train_codes),
+            "training_phenotype_sha256": array_fingerprint(train_phenotype),
+            "screening_dosage_encoding_version": GENOTYPE_ENCODING_VERSION,
+            "screening_algorithm_version": SCREENING_ALGORITHM_VERSION,
+            "screening_imputer": None
+            if screening_imputer is None
+            else screening_imputer.metadata_,
+            "wide_input_mode": "dosage_v1",
+            "wide_imputer": wide_metadata,
+        }
+        (artifacts / "preprocessing.json").write_text(
+            json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        save_model_config(self.config, self.best_model_save_dir)
+        config_path = self.best_model_save_dir / "model_config.json"
+        saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+        saved_config["snp_dim"] = self.snp_dim
+        config_path.write_text(
+            json.dumps(saved_config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        self.logger.info(
+            f"仅训练个体筛选: train_n={len(train_idx)}, 原始维度={self.original_snp_dim}, "
+            f"筛选后={self.snp_dim}, train_hash={self.train_indices_sha256}, "
+            f"cache_key={self.screening_cache_key}, Wide策略={self.config.wide_missing_strategy}"
+        )
 
     def _create_model(self):
         """获取模型"""
@@ -190,6 +364,8 @@ class TFPPTrainer:
             dropout=self.dropout,
             degree=self.degree,
             ablation_mode=self.ablation_mode,
+            wide_input_mode="legacy_categorical" if self.use_kfold else "dosage_v1",
+            wide_fill_values=self.wide_fill_values,
         ).to(self.device)
 
     def _create_dataset(self):
@@ -517,36 +693,13 @@ class TFPPTrainer:
 
         start_time = time.time()
 
-        indices = None
-        if self.config.split_file is not None:
-            indices = load_or_create_split(
-                self.config.split_file,
-                n_samples=self.num_sample,
-                ratios=(self.train_ratio, self.val_ratio, self.test_ratio),
-                seed=self.seed,
-            )
-            self.logger.info(
-                f"使用个体划分 {self.config.split_file}: seed={indices.metadata['seed']}, "
-                f"比例={indices.metadata['ratios']}, sample_id_source=row_index"
-            )
-
-        # 创建数据加载器
-        train_loader, val_loader, test_loader, scalers = get_dataloader(
-            dataset=self.dataset,
-            norm_method=self.norm_method,
-            scaler_type=self.scaler_type,
-            batch_size=self.batch_size,
-            train_ratio=self.train_ratio,
-            test_ratio=self.test_ratio,
-            val_ratio=self.val_ratio,
-            seed=self.seed,
-            device=self.device,
-            indices=indices,
+        # 初始化时已固定划分并只用训练个体完成筛选和 scaler 拟合，不能再次划分。
+        train_loader, val_loader, test_loader, scalers = (
+            self.train_loader,
+            self.val_loader,
+            self.test_loader,
+            self.scalers,
         )
-
-        # 保存表型的归一化器，用于在预测的时候进行反归一化
-        save_scalers(scalers, self.scaler_file)
-        self.logger.info(f"归一化器已保存至: {self.scaler_file}")
         self.logger.info("数据加载完成")
 
         # 创建优化器和调度器

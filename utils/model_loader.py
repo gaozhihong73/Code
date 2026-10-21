@@ -197,6 +197,12 @@ def load_tfpp_model(
         if time_coordinates is None:
             time_coordinates = list(range(1, time_points + 1))
 
+    # 新 checkpoint 自带训练期 Wide 填补 buffer；旧权重显式保留旧输入语义。
+    wide_input_mode = "dosage_v1" if "wide_fill_values" in ckpt else "legacy_categorical"
+    recorded_mode = (saved_config or {}).get("wide_input_mode", wide_input_mode)
+    if recorded_mode != wide_input_mode:
+        raise ValueError("checkpoint 的 Wide 输入语义与 model_config.json 不一致")
+
     # 构建模型
     model = TFPP(
         snp_dim=snp_dim,
@@ -210,6 +216,8 @@ def load_tfpp_model(
         phenotype_names=phenotype_names,
         degree=degree,
         ablation_mode=ablation_mode,
+        wide_input_mode=wide_input_mode,
+        wide_fill_values=ckpt.get("wide_fill_values"),
     ).to(device)
 
     model.load_state_dict(ckpt)
@@ -227,6 +235,7 @@ def load_tfpp_model(
         "time_coordinates": time_coordinates,
         "phenotype_names": phenotype_names,
         "ablation_mode": ablation_mode,
+        "wide_input_mode": wide_input_mode,
         "ckpt_path": str(ckpt_path),
         "config_source": "model_config.json" if saved_config else "state_dict_inference",
     }
@@ -282,6 +291,8 @@ def save_model_config(config, model_dir: str | Path) -> None:
         "screen_missing_strategy": config.screen_missing_strategy,
         "genotype_encoding_version": GENOTYPE_ENCODING_VERSION,
         "screening_algorithm_version": SCREENING_ALGORITHM_VERSION,
+        "wide_input_mode": "legacy_categorical" if getattr(config, "use_kfold", True) else "dosage_v1",
+        "wide_missing_strategy": getattr(config, "wide_missing_strategy", "legacy"),
     }
 
     config_path = model_dir / "model_config.json"

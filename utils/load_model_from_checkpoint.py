@@ -65,6 +65,8 @@ def load_model_from_checkpoint(model_dir: str | Path, device: str = "cpu"):
         phenotype_names=phenotype_names,
         degree=degree,
         ablation_mode="wide",
+        wide_input_mode="dosage_v1" if "wide_fill_values" in ckpt else "legacy_categorical",
+        wide_fill_values=ckpt.get("wide_fill_values"),
     ).to(device)
 
     model.load_state_dict(ckpt)

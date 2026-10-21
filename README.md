@@ -157,17 +157,41 @@ dataset/maize/
 `TrainingDosageImputer.fit(dosage, train_idx=...)` 在指定训练个体上拟合逐位点众数，
 并列选择较小的观测剂量，训练中整列缺失则报错。`metadata_` 记录训练行号、缺失计数、
 填充值和编码版本，可随实验保存为 JSON。缺失可以经显式众数策略填为0，但不会自动当作观测剂量0。
-第1A步仅提供接口与合成测试，生产流程不执行 fit；遇缺失必须停止，待第2步在 train_idx 上接入。
+普通 TFPP 已在固定划分后接入 mode，仅用训练个体拟合筛选填补规则；K折和模拟筛选仍不自动 fit。
 
 真实管线在筛选前显式解码模型类别；模拟管线使用相同剂量筛选，进入模型时统一转为四类别码，
 `SimTFPPConfig.num_embeddings` 默认改为4。旧三类别模拟 checkpoint 仍依赖旧编码，
-不能与新编码管线混用。TFPP/ConvAE 网络结构及筛选时机没有改变。
+不能与新编码管线混用。普通 TFPP 在划分后筛选；K折与模拟训练暂保持旧流程。
 
 `screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练、推理 CLI
 仍可显式传 `--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。
 旧实验若使用逐表型并集，推理时必须显式指定 `false`。
 缓存键新增编码版本 `dosage012_missing-1_categorical0123_v1`、筛选算法版本
-`gwas_pca_rint_minp_dcsis_v3` 和缺失策略，使旧文件不再命中；不删除旧缓存，训练索引哈希留待第2步加入。
+`gwas_pca_rint_minp_dcsis_v3` 和缺失策略。普通训练还加入稳定训练索引哈希、训练 SNP/表型内容指纹、
+表型列表、筛选参数及 split 标识；不读取全数据文件 mtime，所以修改验证/测试行不改变缓存键。
+旧缓存保留，但普通训练不会命中原先全量筛选缓存。
+
+### 普通 TFPP 的训练个体隔离与双输入视图
+
+普通模式的顺序是：加载类别 SNP/原始表型 → 固定 split → 仅训练行转换剂量并筛选 →
+用原始列索引切片三组类别 SNP → 仅训练表型拟合 scaler → 按筛选后维度创建模型。
+多表型联合筛选能力与 `screen_multivariate` 显式配置保持可用。
+
+Deep 只接收类别 `0/1/2/3`，保留缺失类别0。Wide 独立恢复剂量，再除以2得到 `0/0.5/1`；
+`--wide_missing_strategy mode`（默认）只用训练个体的逐位点众数填补 Wide 缺失，并将填充值
+保存为 checkpoint buffer；`error` 拒绝 Wide 缺失。不将筛选的填补结果写回 Deep 输入。
+线性注意力、时间预测头和门控未改变；K折与模拟模型显式使用 `legacy_categorical` 兼容路径。
+
+每次普通训练在实验目录保存：
+
+- `preprocessing/split.npz`：实际划分副本；JSON 同时记录源路径及文件 SHA-256。
+- `preprocessing/screened_indices.npy`：相对于原始 SNP 矩阵的列索引，关闭筛选时为全部列。
+- `preprocessing/preprocessing.json`：维度、筛选配置、训练行/数据指纹、缓存键、编码版本及填补元数据。
+- `scalers/scaler.pkl`：只由训练表型拟合的 scaler。
+
+`load_tfpp_model()` 恢复新模型的 Wide 填补参数；旧权重显式保留旧输入语义。
+`infer.py` 的测试集自动重建尚未迁移，因此对新模型拒绝全量重新筛选；外部模式应先按保存的
+列索引与顺序准备 SNP。K折的全量监督筛选泄漏尚未在本步修复。
 
 ### 共享个体划分
 
@@ -179,7 +203,8 @@ uv run python train.py --split_file splits/maize_seed73.npz --seed 73
 
 文件不存在时，按当前比例和 seed 生成并保存；文件存在时，以文件中的索引为准，保留其划分 seed 和比例元数据，
 不会重新划分或覆盖。`--split_file auto` 根据样本数、seed、比例和个体顺序哈希在 `splits/` 下命名。
-单份划分不能与 `--use_kfold true` 同时使用；未指定 `split_file` 时保持原来的随机划分行为。
+单份划分不能与 `--use_kfold true` 同时使用；普通 TFPP 未指定 `split_file` 时也自动保存并复用划分，
+索引生成规则与原先相同 seed/比例的 `random_split` 一致。
 
 当前真实数据加载器没有显式个体 ID，因此文件明确记录 `sample_id_source=row_index`，
 使用原始数据行号作为 sample_id。复用时须保持 SNP 与表型行顺序一致；仅凭行号无法识别
@@ -197,7 +222,7 @@ split = load_split("splits/example.npz", sample_ids=["maize-A", "maize-B", "maiz
 ConvAE 通过 `ConvAEConfig(split_file="splits/maize_seed73.npz")` 复用文件，
 只将其中 train/val 个体传给训练/验证 loader，test 个体保持留出。
 两个 loader 也支持 `indices=split`，K 折 loader 继续接收三组显式索引并校验覆盖和互斥。
-每行个体的全部时间点始终一起取出。本阶段仅统一划分，筛选和归一化原有调用顺序保持不变。
+每行个体的全部时间点始终一起取出。普通 TFPP 已将筛选移动到划分后；ConvAE 的预处理时机尚未迁移。
 
 快速 CPU 测试（使用合成数据与临时目录，不需要玉米数据或 GPU）：
 

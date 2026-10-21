@@ -58,7 +58,7 @@ def model_code_tensor(codes: torch.Tensor | np.ndarray) -> torch.Tensor:
 class TrainingDosageImputer:
     """仅按显式 train_idx 拟合逐位点众数；并列取较小剂量，全缺失位点报错。
 
-    本步骤仅提供接口。生产调用方必须在第2步完成划分后再 fit，不能全量拟合。
+    普通训练必须在完成划分后再 fit，不能全量拟合。
     metadata 可作为 JSON 随实验保存，包含训练行号、每列填充值和缺失计数。
     """
 
@@ -133,6 +133,30 @@ def prepare_screening_dosage(
     if ((dosage == -1) | np.isnan(dosage)).any():
         raise ValueError(
             f"筛选发现缺失基因型 (策略={missing_strategy})；禁止当作剂量0。"
-            "mode 需要在第2步 train_idx 上 fit 的填补器，本步骤不执行自动 fit"
+            "mode 需要仅在 train_idx 上 fit 的填补器，禁止自动全量 fit"
         )
     return validate_dosage(dosage)
+
+
+def tfpp_input_views(
+    codes: torch.Tensor,
+    wide_fill_values: torch.Tensor | None = None,
+    *,
+    legacy_categorical: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """分离 Deep 类别与 Wide 剂量；旧路径仅供未迁移的 K折/模拟与旧权重。"""
+    deep = model_code_tensor(codes)
+    if legacy_categorical:
+        return deep, deep.float() / 2.0
+    dosage = deep.float() - 1.0
+    missing = deep == 0
+    if wide_fill_values is not None and wide_fill_values.numel():
+        fill = wide_fill_values.to(device=deep.device, dtype=dosage.dtype)
+        if fill.shape != (deep.shape[-1],) or not torch.isfinite(fill).all():
+            raise ValueError("Wide 填补参数必须与 SNP 列一一对应")
+        if not ((fill >= 0) & (fill <= 2)).all():
+            raise ValueError("Wide 填补剂量必须在 [0,2] 内")
+        dosage = torch.where(missing, fill, dosage)
+    elif missing.any():
+        raise ValueError("Wide 缺失值必须使用训练期保存的填补参数")
+    return deep, dosage / 2.0

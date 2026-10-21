@@ -212,12 +212,16 @@ class TFPPDataset:
 
         # self.snp 明确为模型类别码；筛选调用方必须显式解码为剂量。
         self.snp = dosage_to_model_codes(np.load(snp_file))
+        self.sample_ids = np.arange(len(self.snp), dtype=np.int64)
+        self.sample_id_source = "row_index"  # 当前文件没有可信的生物学个体ID。
 
         self.pheno_dir = pheno_dir
         self.phenotype_names = phenotype_names
 
         # 加载表型数据(未归一化)
         self.phenotype = self.load_phenotypes()  # [n_sample, n_pheno, n_time_points]
+        if self.phenotype.shape[0] != len(self.snp):
+            raise ValueError("SNP 与表型个体行数不一致，不能建立共享个体划分")
 
     def load_phenotypes(self):
         """加载并合并所有表型数据（不进行归一化）。

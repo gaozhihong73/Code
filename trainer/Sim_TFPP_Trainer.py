@@ -132,6 +132,7 @@ class SimTFPPTrainer:
             dropout=self.dropout,
             degree=self.degree,
             ablation_mode=self.config.ablation_mode,
+            wide_input_mode="legacy_categorical",  # 模拟训练不在本步迁移范围。
         ).to(self.device)
 
     def _create_dataset(self):

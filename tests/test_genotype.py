@@ -196,6 +196,7 @@ class GenotypeTests(unittest.TestCase):
                     phenotype_names=["toy"],
                     screen_k=4,
                     gwas_k=4,
+                    use_kfold=True,  # 第2步后此测试仅覆盖尚未迁移的旧K折路径。
                     device="cpu",
                 )
             )
@@ -266,6 +267,7 @@ class GenotypeTests(unittest.TestCase):
                         screen_k=4,
                         gwas_k=4,
                         screen_missing_strategy="mode",
+                        use_kfold=True,  # 普通训练现已允许仅训练个体拟合。
                         device="cpu",
                     )
                 )

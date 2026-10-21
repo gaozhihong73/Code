@@ -192,6 +192,12 @@ def predict():
     # 1. 加载模型 (自动推测结构参数)
     print(f"[*] 正在加载模型: {args.model_path}")
     model, model_info = load_tfpp_model(args.model_path, device=str(device))
+    if model_info.get("wide_input_mode") == "dosage_v1" and args.input_snp is None:
+        raise ValueError(
+            "新普通训练模型必须复用 preprocessing/split.npz 和 screened_indices.npy。"
+            "测试集推理入口尚未迁移，禁止重新使用全体表型筛选；"
+            "可先按保存索引准备 --input_snp，模型会加载训练期 Wide 填补参数。"
+        )
     phenotype_names = model_info["phenotype_names"]
     print(
         f"[*] 模型结构: d_model={model_info['d_model']}, "

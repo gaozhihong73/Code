@@ -236,6 +236,28 @@ class SplitTests(unittest.TestCase):
                 obj.scaler_file, obj.logger = "unused", Mock()
                 obj._log_configuration = Mock()
                 obj._create_optimizer_and_scheduler = Mock(side_effect=RuntimeError("stop-before-training"))
+                if kind == "TFPP":
+                    # 普通训练在 __init__ 中固定划分；直接测试数据准备入口。
+                    dataset.snp = np.tile(np.array([[1, 2, 3]], dtype=np.int8), (40, 1))
+                    obj.original_snp_dim = 3
+                    obj.screen_k = obj.gwas_k = 0
+                    obj.screen_multivariate = True
+                    obj.screen_missing_strategy = "error"
+                    obj.wide_fill_values = None
+                    obj.snp_file, obj.pheno_dir = "unused.npy", "unused"
+                    obj.phenotype_names = ["toy"]
+                    class LocalTFPPConfig(TFPPConfig):
+                        @property
+                        def output_dir(self):
+                            return str(self_temp / "experiment")
+                    self_temp = Path(self.temp.name)
+                    obj.config = LocalTFPPConfig(split_file=str(self.path), device="cpu")
+                    obj.best_model_save_dir = self_temp / "experiment" / "models"
+                    obj.scaler_file = str(self_temp / "experiment" / "scaler.pkl")
+                    with patch.object(module, loader_name, wraps=getattr(module, loader_name)) as wrapped:
+                        obj._prepare_regular_data()
+                    self.assert_same_indices(shared, wrapped.call_args.kwargs["indices"])
+                    continue
                 loader = getattr(module, loader_name)
                 with patch.object(module, loader_name, wraps=loader) as wrapped:
                     with patch.object(module, "save_scalers", create=True):

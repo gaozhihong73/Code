@@ -6,6 +6,7 @@
 """
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,27 @@ from .Genotype import GENOTYPE_ENCODING_VERSION, validate_dosage
 
 
 SCREENING_ALGORITHM_VERSION = "gwas_pca_rint_minp_dcsis_v3"
+
+
+def array_fingerprint(array: np.ndarray) -> str:
+    """按形状、dtype 和内容计算稳定哈希，不依赖全数据文件的 mtime。"""
+    array = np.ascontiguousarray(array)
+    digest = hashlib.sha256()
+    digest.update(str(array.shape).encode())
+    digest.update(array.dtype.str.encode())
+    raw = memoryview(array).cast("B")
+    for start in range(0, len(raw), 1024 * 1024):
+        digest.update(raw[start:start + 1024 * 1024])
+    return digest.hexdigest()
+
+
+def training_indices_hash(indices: np.ndarray) -> str:
+    """保留训练行顺序，以显式小端 int64 编码记录训练个体。"""
+    values = np.asarray(indices)
+    if (values.ndim != 1 or values.dtype.kind not in "iu" or not values.size
+            or (values < 0).any() or len(np.unique(values)) != len(values)):
+        raise ValueError("训练索引必须为一维互异整数")
+    return array_fingerprint(values.astype("<i8"))
 
 
 def _log(logger, msg: str) -> None:
@@ -41,10 +63,14 @@ def compute_cache_key(
     split_info: str = "",
     multivariate: bool = False,
     missing_strategy: str = "error",
+    *,
+    train_indices: np.ndarray | None = None,
+    train_genotype: np.ndarray | None = None,
+    train_phenotype: np.ndarray | None = None,
 ) -> str:
-    """根据数据文件路径+mtime 和筛选参数计算 MD5 缓存键。
+    """普通训练用训练个体内容指纹；旧K折/模拟调用保留路径+mtime 缓存。
 
-    数据文件被修改（mtime 变化）时哈希自动改变，缓存失效。
+    提供 train_indices 时不读取全数据文件 mtime，不受 held-out 数据修改影响。
     注意: multivariate 参与哈希, 避免多元/逐表型两种筛选结果互相污染缓存。
 
     Parameters
@@ -67,6 +93,8 @@ def compute_cache_key(
         是否使用多元 DC-SIS 模式（多表型拼接联合筛选），默认 ``False``。
     missing_strategy : str, optional
         显式缺失策略标识，参与缓存键；编码/算法版本也参与缓存键。
+    train_indices, train_genotype, train_phenotype : np.ndarray, optional
+        普通训练必须同时传入训练原始行号及训练子矩阵；只哈希这些内容。
 
     Returns
     -------
@@ -74,10 +102,30 @@ def compute_cache_key(
         32 位十六进制 MD5 哈希字符串。
     """
     hasher = hashlib.md5()
-    # 编码/算法升级强制使旧缓存失效；训练索引哈希在第2步接入。
+    # 编码/算法版本以及训练感知缓存命名空间使旧筛选缓存失效。
     hasher.update(
         f"{GENOTYPE_ENCODING_VERSION}|{SCREENING_ALGORITHM_VERSION}|{missing_strategy}".encode()
     )
+
+    if train_indices is not None:
+        if train_genotype is None or train_phenotype is None:
+            raise ValueError("训练感知缓存必须提供训练 SNP 和表型指纹")
+        if len(train_indices) != len(train_genotype) or len(train_indices) != len(train_phenotype):
+            raise ValueError("缓存训练数据与训练索引行数不一致")
+        # 普通模式仅包含训练内容；修改 held-out 行或文件 mtime 不影响缓存键。
+        payload = {
+            "cache_scope": "train_only_v1",
+            "train_indices_sha256": training_indices_hash(train_indices),
+            "genotype_sha256": array_fingerprint(train_genotype),
+            "phenotype_sha256": array_fingerprint(train_phenotype),
+            "phenotype_names": list(phenotype_names),
+            "screen_k": screen_k, "gwas_k": gwas_k, "seed": seed,
+            "multivariate": multivariate, "split_info": split_info,
+        }
+        hasher.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+        return hasher.hexdigest()
+    if train_genotype is not None or train_phenotype is not None:
+        raise ValueError("训练指纹不能缺少 train_indices")
 
     # 文件路径 + 修改时间
     for fpath in [snp_file, pheno_source]:
@@ -627,6 +675,8 @@ def screen_snps(
     else:
         screened_idx = gwas_union
 
+    if screened_idx is None:
+        return None  # k >= 原始维度时保持全列，不尝试把 None 转成索引。
     screened_idx = np.sort(np.asarray(screened_idx)).astype(np.int64)
 
     if verbose:

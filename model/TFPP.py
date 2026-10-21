@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from utils.Genotype import model_code_tensor
+from utils.Genotype import model_code_tensor, tfpp_input_views
 
 
 class LinearSelfAttention(nn.Module):
@@ -565,6 +565,8 @@ class TFPP(nn.Module):
         phenotype_names,
         degree=3,
         ablation_mode="none",
+        wide_input_mode="dosage_v1",
+        wide_fill_values=None,
     ):
         """初始化 TFPP 模型。
 
@@ -598,6 +600,17 @@ class TFPP(nn.Module):
         self.time_points = len(time_coordinates)
 
         self.ablation_mode = ablation_mode
+        if wide_input_mode not in ("dosage_v1", "legacy_categorical"):
+            raise ValueError("未知的 Wide 输入语义")
+        self.wide_input_mode = wide_input_mode
+        if wide_input_mode == "dosage_v1":
+            fill = torch.as_tensor(
+                [] if wide_fill_values is None else wide_fill_values, dtype=torch.float32
+            ).clone()
+            if fill.numel() and (fill.shape != (snp_dim,) or not torch.isfinite(fill).all()
+                                 or not ((fill >= 0) & (fill <= 2)).all()):
+                raise ValueError("Wide 填补参数不合法")
+            self.register_buffer("wide_fill_values", fill)
 
         # ==============================================================================
         # Deep Path: SNP 嵌入 + 局部卷积 + Linear Transformer 编码
@@ -670,8 +683,12 @@ class TFPP(nn.Module):
         # 1. Wide Path: SNP -> Legendre 系数 -> 时间曲线
         # ==============================================================================
         model_codes = model_code_tensor(x)
-        x_norm = x / 2.0
-        out_wide = self.wide_layer(x_norm)  # (B, num_phenotypes, num_time_points)
+        if self.ablation_mode != "deep" or self.wide_input_mode == "legacy_categorical":
+            _, wide_input = tfpp_input_views(
+                model_codes, getattr(self, "wide_fill_values", None),
+                legacy_categorical=self.wide_input_mode == "legacy_categorical",
+            )
+            out_wide = self.wide_layer(wide_input)
 
         if self.ablation_mode == "wide":
             return out_wide

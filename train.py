@@ -209,7 +209,16 @@ def parse_args():
         "--screen_missing_strategy",
         choices=["error", "mode"],
         default=TFPPConfig.model_fields["screen_missing_strategy"].default,
-        help="筛选缺失策略；mode 遇缺失需第2步 train_idx 拟合接口，本步骤不自动fit",
+        help="筛选缺失策略；普通训练 mode 仅在 train_idx 上拟合众数，K折尚未接入",
+    )
+    parser.add_argument(
+        "--wide_missing_strategy", choices=["error", "mode"],
+        default=TFPPConfig.model_fields["wide_missing_strategy"].default,
+        help="普通训练 Wide 剂量缺失策略；不改变 Deep 的缺失类别0",
+    )
+    parser.add_argument(
+        "--screen_cache_dir", default=TFPPConfig.model_fields["screen_cache_dir"].default,
+        help="筛选索引缓存目录",
     )
 
     # ================= 损失函数与正则化 =================
@@ -373,6 +382,8 @@ def main():
         gwas_k=args.gwas_k,
         screen_multivariate=args.screen_multivariate,
         screen_missing_strategy=args.screen_missing_strategy,
+        wide_missing_strategy=args.wide_missing_strategy,
+        screen_cache_dir=args.screen_cache_dir,
         loss_type=args.loss_type,
         pcc_weight=args.pcc_weight,
         offset_weight=args.offset_weight,

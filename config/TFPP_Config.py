@@ -138,8 +138,17 @@ class TFPPConfig(BaseModel):
     screen_missing_strategy: str = Field(
         default="error",
         pattern="^(error|mode)$",
-        description="筛选缺失策略：error=拒绝，mode=使用仅在 train_idx 上拟合的众数填补器；第1A步不自动fit",
+        description="筛选缺失策略：error=拒绝，mode=仅在普通训练 train_idx 上拟合逐位点众数",
     )
+    wide_missing_strategy: str = Field(
+        default="mode", pattern="^(error|mode)$",
+        description="普通训练 Wide 剂量缺失策略，独立于筛选；mode 仅在训练个体拟合",
+    )
+    screen_cache_dir: str = "dataset/screen_cache"
+
+    @property
+    def preprocessing_save_dir(self) -> str:
+        return f"{self.output_dir}/preprocessing"
 
     # 损失函数
     loss_type: str = Field(
