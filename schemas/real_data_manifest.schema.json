@@ -1,0 +1,123 @@
+{
+  "additionalProperties": false,
+  "description": "v1 private scan artifact; nested statistics are JSON-safe and content-hashed.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "created_at_utc": {
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "code": {
+      "additionalProperties": true,
+      "title": "Code",
+      "type": "object"
+    },
+    "environment": {
+      "additionalProperties": true,
+      "title": "Environment",
+      "type": "object"
+    },
+    "parameters": {
+      "additionalProperties": true,
+      "title": "Parameters",
+      "type": "object"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "blocked"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "genotype": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Genotype"
+    },
+    "phenotypes": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Phenotypes",
+      "type": "array"
+    },
+    "identity": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Identity"
+    },
+    "id_discovery": {
+      "additionalProperties": true,
+      "title": "Id Discovery",
+      "type": "object"
+    },
+    "auxiliary": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Auxiliary",
+      "type": "array"
+    },
+    "statistics_policy": {
+      "title": "Statistics Policy",
+      "type": "string"
+    },
+    "artifacts": {
+      "additionalProperties": true,
+      "title": "Artifacts",
+      "type": "object"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    }
+  },
+  "required": [
+    "created_at_utc",
+    "code",
+    "environment",
+    "parameters",
+    "status",
+    "errors",
+    "genotype",
+    "phenotypes",
+    "identity",
+    "id_discovery",
+    "auxiliary",
+    "statistics_policy",
+    "artifacts",
+    "manifest_sha256"
+  ],
+  "title": "RealDataManifest",
+  "type": "object"
+}

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "created_at_utc": "2000-01-01T00:00:00+00:00",
+  "code": {
+    "commit": "0000000000000000000000000000000000000000",
+    "dirty": false
+  },
+  "environment": {},
+  "parameters": {
+    "snp_file": "<DATA_ROOT>/snp.npy",
+    "pheno_dir": "<DATA_ROOT>/pheno"
+  },
+  "status": "blocked",
+  "errors": [
+    "Illustrative synthetic values only; not a real-data approval"
+  ],
+  "genotype": {
+    "path": "<DATA_ROOT>/snp.npy",
+    "shape": [
+      8,
+      12
+    ],
+    "dtype": "int8"
+  },
+  "phenotypes": [],
+  "identity": {
+    "sample_id_source": "row_index",
+    "evidence_type": "user_source_order_attestation",
+    "alignment_status": "unconfirmed"
+  },
+  "id_discovery": {},
+  "auxiliary": [],
+  "statistics_policy": "descriptive_only_no_selection_no_imputation_fit; observed_diploid_MAF; population_variance_ddof0",
+  "artifacts": {},
+  "manifest_sha256": "3fdb6bbf271ccfbf71c242cc23f39e1f3fd668e09660587c6b1998160ce0991c"
+}

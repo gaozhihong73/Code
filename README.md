@@ -936,3 +936,49 @@ git diff --check
 审计已验证152项完整测试。CPU 合成通过代表实现与产物链可用，不代表真实预测性能、GPU 数值一致性或大数据资源预算已验证。
 正式实验前需固定真实文件 SHA256、实际 N/P、完整时间列/坐标、trait set、共享普通 split 或完整 folds、
 train-size 计划和独立输出根目录；提交代码并保持 clean 后再启动。保留 spec、所有产物、每折明细和指标有效计数。
+
+## 第12步：真实输入只读体检与冻结
+
+`inspect_real_data.py` 只描述和冻结数据，不训练、不运行GWAS/DC-SIS，不产生筛选索引或test指标。
+唯一正式输入为下述明确路径；`snp_50000.npy`、`snp_mi_*`、模拟数据和清洗/三性状目录不会自动替代。
+`all_phenotype_h2.csv`、`gene_snp_mapping.csv`只登记辅助哈希，不作训练输入。
+
+```bash
+# 只在用户已确认这些当前源文件行序一致时提供确认日期；本项目确认日期为2026-10-22
+.venv/bin/python -B inspect_real_data.py \
+  --snp_file dataset/maize/snp/snp_2860770.npy \
+  --pheno_dir dataset/maize/pheno \
+  --output_root outputs/preflight --attestation_date 2026-10-22
+
+# 每次使用前重验当前字节和完整源清单；只读、零结果写入
+.venv/bin/python -B inspect_real_data.py \
+  --verify_manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json
+
+.venv/bin/python -B -m unittest discover -s tests -p test_real_data_preflight.py -v
+```
+
+NPY按header核对真实shape、方向和C/F顺序，用只读mmap按列块统计0/1/2、NaN/-1、逐列缺失率、
+MAF与总体方差摘要。MAF分母只含已观测二倍体剂量；全缺失列的MAF/方差未定义，不冒充零。
+这些全体描述统计不能作为正式筛选/填补/QC拟合结果；后续仍只在train/subset/fold拟合。
+CSV时间列须能解析且原本已按数值自然顺序排列；重复、乱序、网格不同、非有限表型、非法剂量或疑似转置
+立即保存blocked报告并停止，不自动重排、转置、填补或删列。时间标签的数字不证明其生物学单位，须另确认。
+
+当前没有生物学ID/顺序映射：冻结行索引`0..N-1`，证据为`user_source_order_attestation`，
+状态为`confirmed_by_user_source_order`，不能写成`verified_by_biological_id`。
+每次确认绑定SNP和全部性状当前SHA256；源文件内容、顺序或性状清单变化后，旧manifest验证失败，必须重新确认。
+重复扫描也检查同一输出根目录的既有确认；源哈希变化时仅沿用旧日期会被阻塞。重新确认后才可用`--attestation_file`提供
+含`evidence_type`、`attestation_date`及`source_hashes`（snp哈希与phenotypes文件名→哈希）的凭据；脚本不自动签发新确认。
+如果发现真实ID或外部映射候选，必须先检查，不能默默降级行号；显式`--snp_ids_file`可验证SNP行ID与各表型ID。
+当前实验runner只支持row_index，不会将生物学ID清单静默转换。
+
+私有结果全部保存在Git忽略的`outputs/preflight/<canonical_hash>/`：manifest、扫描报告、
+冻结sample_ids、性状候选表、`experiment.template.json`和`next_steps.txt`。
+manifest自哈希是去除`manifest_sha256`字段后的UTF-8 canonical JSON（排序key、紧凑分隔、无NaN）的SHA256。
+已有同哈希目录禁止覆盖。公开[schema](schemas/real_data_manifest.schema.json)及
+[虚构脱敏示例](examples/real_data_manifest.redacted.json)不含真实路径、哈希、表型值或个体信息。
+
+下一步只准备模板，本步骤不创建真实split、不执行experiment dry-run。先验证manifest，再由其FileRefs填写实验spec；
+runner目前不接收`real_manifest`字段，不得把模板当成已执行或已获正式资格的实验。
+需预先确定主要性状（不按预测效果排序）、全部时间列/坐标含义、K折数、seed、训练比例、候选k/gwas_k和输出根目录。
+普通split创建模板见私有`next_steps.txt`；完成spec后使用`run_experiments.py dry-run <SPEC.json>`。
+正式启动仍须锁定clean代码提交；体检时的dirty状态如实记录，不构成正式运行资格。
