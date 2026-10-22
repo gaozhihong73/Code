@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from config import TFPPConfig
 from dataloader import TFPPDataset, get_dataloader
+from dataloader.TFPP_DataLoader import get_train_val_dataloader
 from model import TFPP
 from trainer._scheduler import WarmupSequentialLR
 from utils import (
@@ -69,6 +70,7 @@ class TFPPTrainer:
         """初始化训练器并构建数据集与模型。"""
         # 保存配置
         self.config = config
+        self.run_stage = config.run_stage
         existing = Path(config.output_dir)
         if (existing / "models/best_model.pt").exists() or (existing / "test_evaluation.json").exists():
             raise FileExistsError("实验已有 checkpoint/test 预约，禁止覆盖或再次观察 test；请使用新实验目录或 runner --resume")
@@ -93,7 +95,20 @@ class TFPPTrainer:
 
         # 数据集初始化
         self.phenotype_names = config.phenotype_names
-        self.dataset = self._create_dataset()
+        self._pretest_split = None
+        self._pretest_snp_indices = None
+        if self.run_stage == "engineering_pretest":
+            raw = np.load(config.snp_file, mmap_mode="r", allow_pickle=False)
+            self._pretest_split = load_split(config.split_file, n_samples=raw.shape[0])
+            self._pretest_snp_indices = np.load(config.preselected_snp_file, allow_pickle=False)
+            allowed_rows = np.concatenate([
+                self._pretest_split.train_idx, self._pretest_split.val_idx])
+            self.dataset = self._create_dataset(
+                snp_indices=self._pretest_snp_indices,
+                phenotype_row_indices=allowed_rows,
+            )
+        else:
+            self.dataset = self._create_dataset()
         self.num_sample = len(self.dataset)
         if self.dataset.phenotype.shape[2] != len(config.time_coordinates):
             raise ValueError("phenotype 时间列数必须与 time_coordinates 一致")
@@ -119,7 +134,7 @@ class TFPPTrainer:
         )
         self.use_kfold = config.use_kfold
         self.n_folds = config.n_folds
-        self.original_snp_dim = self.dataset.snp.shape[1]
+        self.original_snp_dim = self.dataset.original_snp_dim
         self.wide_fill_values = None
 
         # 训练超参数
@@ -179,15 +194,19 @@ class TFPPTrainer:
         """所有依赖标签的拟合只接收固定 train_idx，模型输入始终保留缺失类别0。"""
         from utils import compute_cache_key, screen_snps
 
+        # 一些旧的单元测试用 ``__new__`` 构造最小 trainer；缺省仍是生产完整阶段。
+        if not hasattr(self, "run_stage"):
+            self.run_stage = "full"
+
         ratios = (self.train_ratio, self.val_ratio, self.test_ratio)
         split_path = self.config.split_file
         if split_path is None or split_path == "auto":
             split_path = default_split_path(
                 self.num_sample, ratios=ratios, seed=self.seed
             )
-        self.split = load_or_create_split(
-            split_path, self.num_sample, ratios=ratios, seed=self.seed
-        )
+        pretest_split = getattr(self, "_pretest_split", None)
+        self.split = (pretest_split if pretest_split is not None else
+                      load_or_create_split(split_path, self.num_sample, ratios=ratios, seed=self.seed))
         train_idx = self.split.train_idx
         if min(len(train_idx), len(self.split.val_idx), len(self.split.test_idx)) == 0:
             raise ValueError("普通训练要求 train/val/test 均非空")
@@ -212,6 +231,11 @@ class TFPPTrainer:
             + ":" + self.split.metadata["sample_ids_sha256"],
             multivariate=self.screen_multivariate,
             missing_strategy=self.screen_missing_strategy,
+            gwas_population_structure=self.config.gwas_population_structure,
+            gwas_n_pcs=self.config.gwas_n_pcs,
+            gwas_pca_panel_size=self.config.gwas_pca_panel_size,
+            gwas_pca_panel_seed=self.config.gwas_pca_panel_seed,
+            gwas_pca_algorithm_version=self.config.gwas_pca_algorithm_version,
             train_indices=train_idx,
             train_genotype=train_codes,
             train_phenotype=train_phenotype,
@@ -242,6 +266,7 @@ class TFPPTrainer:
                 cache_key=self.screening_cache_key,
                 cache_dir=self.config.screen_cache_dir,
                 logger=self.logger,
+                n_pcs=self.config.gwas_n_pcs,
             )
         self.screened_indices = (
             np.arange(self.original_snp_dim)
@@ -258,7 +283,12 @@ class TFPPTrainer:
         ):
             raise ValueError("筛选缓存/结果不是有效的原始 SNP 列索引")
         self.screened_indices = self.screened_indices.astype(np.int64)
-        self.dataset.snp = self.dataset.snp[:, self.screened_indices]
+        pretest_snp_indices = getattr(self, "_pretest_snp_indices", None)
+        if pretest_snp_indices is not None:
+            if not np.array_equal(self.screened_indices, pretest_snp_indices):
+                raise ValueError("pretest Dataset 列与预选原始索引不一致")
+        else:
+            self.dataset.snp = self.dataset.snp[:, self.screened_indices]
         self.snp_dim = self.dataset.snp.shape[1]
 
         # Wide 拟合独立于标签，且不将筛选的填补结果写回 Deep 类别矩阵。
@@ -272,8 +302,13 @@ class TFPPTrainer:
         else:
             prepare_screening_dosage(train_dosage[:, self.screened_indices])
 
-        self.train_loader, self.val_loader, self.test_loader, self.scalers = (
-            get_dataloader(
+        if self.run_stage == "engineering_pretest":
+            self.train_loader, self.val_loader, self.scalers = get_train_val_dataloader(
+                self.dataset, self.split, self.batch_size, self.norm_method,
+                self.scaler_type, device=self.device, num_workers=self.num_workers)
+            self.test_loader = None
+        else:
+            self.train_loader, self.val_loader, self.test_loader, self.scalers = get_dataloader(
                 self.dataset,
                 self.batch_size,
                 self.norm_method,
@@ -282,7 +317,6 @@ class TFPPTrainer:
                 num_workers=self.num_workers,
                 indices=self.split,
             )
-        )
         save_scalers(self.scalers, self.scaler_file)
         artifacts = Path(self.config.preprocessing_save_dir)
         artifacts.mkdir(parents=True, exist_ok=True)
@@ -294,6 +328,9 @@ class TFPPTrainer:
         self.preprocessing_metadata = {
             "schema_version": 3,
             "training_mode": "regular" if self.config.fold_index is None else "kfold",
+            "run_stage": self.run_stage,
+            "purpose": ("engineering_pretest_smoke" if self.run_stage == "engineering_pretest" else "model_training"),
+            "paper_eligible": self.run_stage == "full",
             "fold_index": self.config.fold_index,
             "model_initialization_seed": self.seed,
             "split_source": str(Path(split_path).resolve()),
@@ -319,6 +356,13 @@ class TFPPTrainer:
             )),
             "screen_k": self.screen_k,
             "gwas_k": self.gwas_k,
+            "gwas_population_structure": self.config.gwas_population_structure,
+            "gwas_n_pcs": self.config.gwas_n_pcs,
+            "gwas_pca_panel_size": self.config.gwas_pca_panel_size,
+            "gwas_pca_panel_seed": self.config.gwas_pca_panel_seed,
+            "gwas_pca_algorithm_version": self.config.gwas_pca_algorithm_version,
+            "gwas_pca_panel_indices_file": self.config.gwas_pca_panel_indices_file,
+            "gwas_pca_panel_indices_sha256": self.config.gwas_pca_panel_indices_sha256,
             "screen_multivariate": self.screen_multivariate,
             "screen_missing_strategy": self.screen_missing_strategy,
             "screening_cache_key": self.screening_cache_key,
@@ -332,6 +376,8 @@ class TFPPTrainer:
             else screening_imputer.metadata_,
             "wide_input_mode": "dosage_v1",
             "wide_imputer": wide_metadata,
+            "phenotype_rows_parsed": ([rows.tolist() for rows in self.dataset.parsed_phenotype_rows]
+                                      if self.run_stage == "engineering_pretest" else None),
         }
         (artifacts / "preprocessing.json").write_text(
             json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2),
@@ -368,11 +414,11 @@ class TFPPTrainer:
             wide_fill_values=self.wide_fill_values,
         ).to(self.device)
 
-    def _create_dataset(self):
+    def _create_dataset(self, **kwargs):
         """
         获取数据集对象
         """
-        return TFPPDataset(self.snp_file, self.pheno_dir, self.phenotype_names)
+        return TFPPDataset(self.snp_file, self.pheno_dir, self.phenotype_names, **kwargs)
 
     def _create_loss(self):
         """根据配置创建损失函数。"""
@@ -823,6 +869,24 @@ class TFPPTrainer:
             )
         print()
 
+        if self.run_stage == "engineering_pretest":
+            self.model.load_state_dict(best_model_state)
+            if self.is_save_training_info:
+                self._save_model_info(
+                    best_model_state, best_val_loss, best_epoch, best_val_metrics,
+                    best_val_pheno_metrics, training_time, train_loss_history,
+                    val_loss_history, train_metrics_history, val_metrics_history,
+                    val_pheno_metrics_history, final_lr, None)
+            return {
+                "best_val_loss": best_val_loss,
+                "best_val_metrics": best_val_metrics,
+                "best_epoch": best_epoch,
+                "training_time": training_time,
+                "test_results": None,
+                "purpose": "engineering_pretest_smoke",
+                "paper_eligible": False,
+            }
+
         # 在测试集上评估
         self.logger.info("=" * 60)
         self.logger.info("测试集评估")
@@ -915,7 +979,7 @@ class TFPPTrainer:
         val_metrics_history: list,
         val_pheno_metrics_history: list,
         final_lr: float,
-        test_results: dict,
+        test_results: dict | None,
     ) -> None:
         """保存模型权重及完整的训练元数据（采用 PT + JSON + CSV 分离存储）。
 
@@ -975,7 +1039,14 @@ class TFPPTrainer:
         self.preprocessing_metadata["checkpoint_protocol"] = CHECKPOINT_PROTOCOL
         Path(self.config.preprocessing_save_dir, "preprocessing.json").write_text(
             json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-        seal_checkpoint(self.config.output_dir, extra_files=("test_evaluation.json", "preprocessing/screened_indices.npy"))
+        engineering_extras = ["preprocessing/screened_indices.npy"]
+        if self.config.gwas_pca_panel_indices_file is not None:
+            engineering_extras.append(self.config.gwas_pca_panel_indices_file)
+        seal_checkpoint(
+            self.config.output_dir,
+            extra_files=(tuple(engineering_extras) if test_results is None else
+                         ("test_evaluation.json", "preprocessing/screened_indices.npy")),
+        )
 
         # ==========================================
         # 2. 保存训练摘要与配置元数据 (.json)
@@ -989,6 +1060,8 @@ class TFPPTrainer:
             "best_val_metrics": best_val_metrics,
             "best_val_pheno_metrics": best_val_pheno_metrics,
             "test_results": test_results,
+            "purpose": ("engineering_pretest_smoke" if test_results is None else "model_training"),
+            "paper_eligible": test_results is not None,
         }
 
         summary_path = self.training_history_save_dir / "training_summary.json"

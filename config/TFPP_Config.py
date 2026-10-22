@@ -5,8 +5,10 @@
 """
 
 from datetime import datetime
+from typing import Literal
 
 import torch
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -48,6 +50,8 @@ class TFPPConfig(BaseModel):
     dropout: float = 0.25
     grad_clip_norm: float = 1.0
     is_save_training_info: bool = True  # 是否保存训练好的模型到本地
+    run_stage: Literal["full", "engineering_pretest"] = "full"
+    output_root: str = "outputs/tfpp"
     device: str = Field(
         default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu"
     )  # 训练设备
@@ -125,6 +129,21 @@ class TFPPConfig(BaseModel):
             raise ValueError("split_file 为单次 train/val/test 划分，不能与 use_kfold 同时使用")
         if self.use_kfold and self.fold_index is not None:
             raise ValueError("fold_index 仅用于已确定划分的内部折实验")
+        if self.run_stage == "engineering_pretest" and (
+            self.use_kfold or self.split_file in (None, "auto") or self.preselected_snp_file is None
+        ):
+            raise ValueError("engineering_pretest 必须使用显式 split_file 和预选原始 SNP 索引，且不支持 K 折")
+        if self.run_stage == "full" and (
+            self.gwas_pca_panel_size is not None
+            or self.gwas_pca_algorithm_version != "sklearn_centered_all_train_markers_v1"
+        ):
+            raise ValueError("普通/K折GWAS固定使用当前训练矩阵全部列PCA；panel参数仅供engineering_pretest")
+        if self.run_stage == "engineering_pretest" and (
+            self.gwas_pca_panel_size is None
+            or self.gwas_pca_panel_seed is not None
+            or self.gwas_pca_algorithm_version != "sklearn_randomized_centered_even_panel_v1"
+        ):
+            raise ValueError("engineering_pretest 必须显式记录evenly-spaced PCA panel；该算法不使用panel seed")
         return self
 
     preselected_snp_file: str | None = Field(default=None, description="runner 已保存的原始有序 SNP 列索引；不重做筛选")
@@ -140,6 +159,20 @@ class TFPPConfig(BaseModel):
         ge=0,
         description="GWAS 筛选保留的 SNP 数目, 0=跳过",
     )
+    gwas_population_structure: Literal["pca"] = "pca"
+    gwas_n_pcs: int = Field(default=5, ge=1)
+    gwas_pca_panel_size: int | None = Field(
+        default=None, ge=1,
+        description="None=普通/K折GWAS使用当前训练矩阵全部列；工程pretest显式使用固定panel",
+    )
+    gwas_pca_panel_seed: int | None = Field(
+        default=None, ge=0,
+        description="随机panel时使用；当前evenly-spaced算法不使用随机数，必须为None",
+    )
+    gwas_pca_algorithm_version: str = "sklearn_centered_all_train_markers_v1"
+    gwas_pca_panel_indices_file: str | None = None
+    gwas_pca_panel_indices_sha256: str | None = Field(
+        default=None, pattern="^[0-9a-f]{64}$")
     screen_multivariate: bool = Field(
         default=True,
         description="DC-SIS 多元模式: True=多表型拼接联合筛选, False=逐表型筛选取并集",
@@ -186,7 +219,7 @@ class TFPPConfig(BaseModel):
     @property
     def output_dir(self) -> str:
         """训练输出文件的保存总目录"""
-        return f"outputs/tfpp/{self.exp_name}"
+        return f"{self.output_root}/{self.exp_name}"
 
     @property
     def best_model_save_dir(self) -> str:

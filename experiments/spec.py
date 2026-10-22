@@ -91,7 +91,10 @@ class UnitSpec(StrictModel):
             raise ValueError("TFPP 离散路线不能提供 ConvAE 特征")
         protected = {"exp_name", "phenotype_names", "time_coordinates", "snp_file", "pheno_dir", "split_file",
                      "screen_k", "gwas_k", "use_kfold", "fold_index", "ablation_mode", "seed",
-                     "preselected_snp_file", "screen_cache_dir", "is_save_training_info", "screen_multivariate"}
+                     "preselected_snp_file", "screen_cache_dir", "is_save_training_info", "screen_multivariate",
+                     "gwas_population_structure", "gwas_n_pcs", "gwas_pca_panel_size",
+                     "gwas_pca_panel_seed", "gwas_pca_algorithm_version",
+                     "gwas_pca_panel_indices_file", "gwas_pca_panel_indices_sha256"}
         if protected & self.tfpp.keys() or set(self.tfpp) - TFPPConfig.model_fields.keys():
             raise ValueError("tfpp 包含未知字段或 runner 管理的字段")
         TFPPConfig(exp_name="runner", **self.tfpp)

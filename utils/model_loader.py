@@ -273,7 +273,12 @@ def load_tfpp_model(
         "config_source": "model_config.json" if saved_config else "state_dict_inference",
         "artifacts": artifacts,
         "legacy": not is_new,
-        "paper_eligible": bool(is_new and artifacts.metadata.get("checkpoint_protocol") == "checkpoint_sha256_v1"),
+        "paper_eligible": bool(
+            is_new
+            and artifacts.metadata.get("checkpoint_protocol") == "checkpoint_sha256_v1"
+            and artifacts.metadata.get("paper_eligible", True)
+            and (saved_config or {}).get("paper_eligible", True)
+        ),
     }
 
     if verbose:
@@ -323,6 +328,18 @@ def save_model_config(config, model_dir: str | Path) -> None:
         "phenotype_names": config.phenotype_names,
         "screen_k": config.screen_k,
         "gwas_k": config.gwas_k,
+        "gwas_population_structure": getattr(config, "gwas_population_structure", "pca"),
+        "gwas_n_pcs": getattr(config, "gwas_n_pcs", 5),
+        "gwas_pca_panel_size": getattr(config, "gwas_pca_panel_size", None),
+        "gwas_pca_panel_seed": getattr(config, "gwas_pca_panel_seed", None),
+        "gwas_pca_algorithm_version": getattr(
+            config, "gwas_pca_algorithm_version",
+            "sklearn_centered_all_train_markers_v1",
+        ),
+        "gwas_pca_panel_indices_file": getattr(
+            config, "gwas_pca_panel_indices_file", None),
+        "gwas_pca_panel_indices_sha256": getattr(
+            config, "gwas_pca_panel_indices_sha256", None),
         "screen_multivariate": config.screen_multivariate,
         "screen_missing_strategy": config.screen_missing_strategy,
         "genotype_encoding_version": GENOTYPE_ENCODING_VERSION,
@@ -333,6 +350,11 @@ def save_model_config(config, model_dir: str | Path) -> None:
         "n_folds": getattr(config, "n_folds", None),
         "kfold_val_ratio": getattr(config, "kfold_val_ratio", None),
         "seed": config.seed,
+        "run_stage": getattr(config, "run_stage", "full"),
+        "purpose": ("engineering_pretest_smoke"
+                    if getattr(config, "run_stage", "full") == "engineering_pretest"
+                    else "model_training"),
+        "paper_eligible": getattr(config, "run_stage", "full") == "full",
     }
 
     config_path = model_dir / "model_config.json"

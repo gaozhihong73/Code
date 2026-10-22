@@ -5,6 +5,7 @@
 最终构建 PyTorch DataLoader。
 """
 
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -190,7 +191,8 @@ class TFPPDataset:
         需要加载的表型名称列表，如 ``['RGBVI', 'ExB', 'WI', 'CIVE']``。
     """
 
-    def __init__(self, snp_file: str, pheno_dir: str, phenotype_names: list[str]):
+    def __init__(self, snp_file: str, pheno_dir: str, phenotype_names: list[str],
+                 *, snp_indices=None, phenotype_row_indices=None):
         """初始化数据集，加载 SNP 与表型数据。
 
         Parameters
@@ -210,13 +212,22 @@ class TFPPDataset:
         if not Path(snp_file).exists():
             raise FileNotFoundError(f"SNP文件不存在: {snp_file}")
 
+        # pretest 只从只读 mmap 提取最终列；不会复制完整高维 SNP 矩阵。
+        raw = np.load(snp_file, mmap_mode="r" if snp_indices is not None else None,
+                      allow_pickle=False)
+        self.original_snp_dim = int(raw.shape[1])
+        self.snp_column_indices = None if snp_indices is None else np.asarray(snp_indices, dtype=np.int64)
+        selected = raw if self.snp_column_indices is None else raw[:, self.snp_column_indices]
         # self.snp 明确为模型类别码；筛选调用方必须显式解码为剂量。
-        self.snp = dosage_to_model_codes(np.load(snp_file))
+        self.snp = dosage_to_model_codes(selected)
         self.sample_ids = np.arange(len(self.snp), dtype=np.int64)
         self.sample_id_source = "row_index"  # 当前文件没有可信的生物学个体ID。
 
         self.pheno_dir = pheno_dir
         self.phenotype_names = phenotype_names
+        self.phenotype_row_indices = (None if phenotype_row_indices is None else
+                                      np.asarray(phenotype_row_indices, dtype=np.int64))
+        self.parsed_phenotype_rows = []
 
         # 加载表型数据(未归一化)
         self.phenotype = self.load_phenotypes()  # [n_sample, n_pheno, n_time_points]
@@ -241,13 +252,33 @@ class TFPPDataset:
 
         # 遍历每个表型文件
         for phenotype_name in self.phenotype_names:
-            phenotype = pd.read_csv(Path(f"{self.pheno_dir}/{phenotype_name}.csv"))
-            labels = list(phenotype.columns)
+            path = Path(f"{self.pheno_dir}/{phenotype_name}.csv")
+            if self.phenotype_row_indices is None:
+                frame = pd.read_csv(path)
+                labels = list(frame.columns)
+                phenotype_values = frame.to_numpy(dtype=np.float32)
+                parsed_rows = np.arange(len(frame), dtype=np.int64)
+            else:
+                wanted = set(self.phenotype_row_indices.tolist())
+                values = {}
+                with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                    labels = next(csv.reader([handle.readline()]))
+                    for row_idx, line in enumerate(handle):
+                        if row_idx in wanted:
+                            values[row_idx] = [float(value) for value in next(csv.reader([line]))]
+                if set(values) != wanted:
+                    raise ValueError(f"{phenotype_name}.csv 缺少 train/val 行")
+                phenotype_values = np.full((len(self.snp), len(labels)), np.nan, dtype=np.float32)
+                for row_idx, row in values.items():
+                    phenotype_values[row_idx] = row
+                parsed_rows = np.asarray(sorted(values), dtype=np.int64)
+                self.parsed_phenotype_rows.append(parsed_rows)
             if self.time_labels is not None and labels != self.time_labels:
                 raise ValueError("各表型 CSV 时间列及顺序必须一致")
             self.time_labels = labels
-            phenotype = phenotype.values[:, np.newaxis, :].astype(np.float32)
-            if not phenotype.size or not np.isfinite(phenotype).all():
+            phenotype = phenotype_values[:, np.newaxis, :]
+            checked = phenotype_values[parsed_rows]
+            if not checked.size or not np.isfinite(checked).all():
                 raise ValueError("原始 phenotype 必须非空且有限；缺失策略为 error")
             phenotypes.append(phenotype)
 
@@ -263,6 +294,27 @@ class TFPPDataset:
         """获取单个样本"""
         return self.snp[idx], self.phenotype[idx]
 
+
+def get_train_val_dataloader(dataset, split: IndividualSplit, batch_size: int,
+                             norm_method: str, scaler_type: str, *, device="cpu",
+                             num_workers=0):
+    """仅创建 train/val loader；test 行既不归一化，也不进入 TensorDataset。"""
+    validate_individual_split(split, n_samples=len(dataset))
+    train_idx, val_idx = split.train_idx, split.val_idx
+    train_phenotype = dataset.phenotype[train_idx]
+    val_phenotype = dataset.phenotype[val_idx]
+    # 现有归一化生产函数第三视图只做 transform；复用 val 可避免引入第二套 scaler 算法。
+    train_norm, val_norm, _, meta = _apply_normalization(
+        train_phenotype, val_phenotype, val_phenotype,
+        dataset.phenotype_names, norm_method, scaler_type)
+    pin_memory = device != "cpu"
+    kwargs = {"batch_size": batch_size, "num_workers": num_workers, "pin_memory": pin_memory}
+    train = TensorDataset(to_tensor(dataset.snp[train_idx]), to_tensor(train_norm))
+    val = TensorDataset(to_tensor(dataset.snp[val_idx]), to_tensor(val_norm))
+    scalers = {"phenotype_names": dataset.phenotype_names, "norm_method": norm_method,
+               "pheno_meta": meta, "snp_dim": dataset.snp.shape[1]}
+    return (DataLoader(train, shuffle=True, **kwargs),
+            DataLoader(val, shuffle=False, **kwargs), scalers)
 
 def get_dataloader(
     dataset,

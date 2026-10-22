@@ -982,3 +982,38 @@ runner目前不接收`real_manifest`字段，不得把模板当成已执行或�
 需预先确定主要性状（不按预测效果排序）、全部时间列/坐标含义、K折数、seed、训练比例、候选k/gwas_k和输出根目录。
 普通split创建模板见私有`next_steps.txt`；完成spec后使用`run_experiments.py dry-run <SPEC.json>`。
 正式启动仍须锁定clean代码提交；体检时的dirty状态如实记录，不构成正式运行资格。
+
+## 第13步：真实数据工程 pre-test smoke
+
+`engineering_pretest.py` 是显式的 train/val-only 工程阶段。它复用 TFPP 的生产训练、验证、
+checkpoint 和严格加载路径，但只解析固定 split 中的 train/val 表型行；不会创建 test loader、
+读取 test 表型、预约 test 评估或生成 test 预测/指标。所有产物固定标记
+`purpose=engineering_pretest_smoke`、`paper_eligible=false`，正式汇总器会拒绝该目录。
+
+```bash
+# 零写入计划：重验冻结 manifest、固定 seed=73 的 320/40/40 split、配置 hash、磁盘和输出路径
+.venv/bin/python -B engineering_pretest.py dry-run \
+  --manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json \
+  --output_root outputs/engineering_pretest_smoke
+
+# 分别运行一个 epoch；只能用于工程闭环，不报告为论文性能
+.venv/bin/python -B engineering_pretest.py run --route random_k \
+  --manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json \
+  --output_root outputs/engineering_pretest_smoke
+.venv/bin/python -B engineering_pretest.py run --route gwas_dc_sis \
+  --manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json \
+  --output_root outputs/engineering_pretest_smoke
+
+.venv/bin/python -B -m unittest discover -s tests -p test_engineering_pretest.py -v
+```
+
+`random_k` 只依赖原始列数和 seed。GWAS 的 PCA 群体结构校正在第13步前已存在；普通训练、
+K折和正式 runner 仍在各自 train 矩阵的全部当前 SNP 上拟合5个PC。工程串联路线为避免复制
+完整真实矩阵，新增只读 mmap 分块实现：先用20,000个按原始列位置均匀确定性抽取、与标签无关
+且不使用随机panel seed的 marker 拟合5个PC，再对全部列执行
+train-only GWAS，保留 5,000 列并用生产 DC-SIS 缩至 1,000。每列 mode、表型 scaler 和
+Wide 填充值仅由 320 个 train 个体拟合；Deep 保留缺失类别 0，Wide 用训练众数恢复剂量后除以2。
+PCA只做train均值中心化，不按标准差缩放；零方差marker被记录并安全保留。显式配置与产物记录
+`gwas_population_structure`、PC数、panel大小/seed、算法版本、panel原始列索引及哈希、train中心/
+填补/PCA得分哈希。目录 hash 绑定数据 manifest、路线、筛选参数、代码 commit/dirty tree 和工作树哈希；
+相同配置拒绝覆盖。

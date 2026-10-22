@@ -63,6 +63,11 @@ def compute_cache_key(
     split_info: str = "",
     multivariate: bool = False,
     missing_strategy: str = "error",
+    gwas_population_structure: str = "pca",
+    gwas_n_pcs: int = 5,
+    gwas_pca_panel_size: int | None = None,
+    gwas_pca_panel_seed: int | None = None,
+    gwas_pca_algorithm_version: str = "sklearn_centered_all_train_markers_v1",
     *,
     train_indices: np.ndarray | None = None,
     train_genotype: np.ndarray | None = None,
@@ -121,6 +126,11 @@ def compute_cache_key(
             "phenotype_names": list(phenotype_names),
             "screen_k": screen_k, "gwas_k": gwas_k, "seed": seed,
             "multivariate": multivariate, "split_info": split_info,
+            "gwas_population_structure": gwas_population_structure,
+            "gwas_n_pcs": gwas_n_pcs,
+            "gwas_pca_panel_size": gwas_pca_panel_size,
+            "gwas_pca_panel_seed": gwas_pca_panel_seed,
+            "gwas_pca_algorithm_version": gwas_pca_algorithm_version,
         }
         hasher.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
         return hasher.hexdigest()
@@ -139,6 +149,13 @@ def compute_cache_key(
 
     # 筛选参数
     hasher.update(f"{screen_k}_{gwas_k}_{seed}_{split_info}".encode())
+    hasher.update(json.dumps({
+        "gwas_population_structure": gwas_population_structure,
+        "gwas_n_pcs": gwas_n_pcs,
+        "gwas_pca_panel_size": gwas_pca_panel_size,
+        "gwas_pca_panel_seed": gwas_pca_panel_seed,
+        "gwas_pca_algorithm_version": gwas_pca_algorithm_version,
+    }, sort_keys=True, separators=(",", ":")).encode())
 
     # 筛选方法标识（多元 vs 逐表型并集）
     hasher.update(
@@ -487,6 +504,159 @@ def gwas_screen(
     return idx, min_p
 
 
+def gwas_dc_sis_screen_mmap(
+    snp_file: str | Path,
+    train_indices: np.ndarray,
+    pheno_train: np.ndarray,
+    *,
+    gwas_k: int,
+    screen_k: int,
+    block_columns: int = 16384,
+    n_pcs: int = 5,
+    pca_marker_count: int = 20000,
+    multivariate: bool = True,
+    logger=None,
+) -> tuple[np.ndarray, dict]:
+    """训练行上的 mmap 分块 GWAS→DC-SIS；不构造完整 SNP 副本或全长分数。
+
+    GWAS 与 :func:`gwas_screen` 使用相同动态性状、FWL 回归和 min-P 口径。
+    PCA 使用按原始列顺序确定性抽取的 label-free marker panel，避免构造全矩阵
+    或执行 O(N^2 P) 的精确 Gram 累加；实际 marker 数与算法版本写入返回元数据。
+    每列缺失众数仅由 ``train_indices`` 拟合；DC-SIS 只物化 GWAS 候选列。
+    """
+    import time
+
+    if min(gwas_k, screen_k, block_columns, pca_marker_count) < 1:
+        raise ValueError("gwas_k、screen_k、block_columns 和 pca_marker_count 必须为正整数")
+    train_indices = np.asarray(train_indices, dtype=np.int64)
+    raw = np.load(snp_file, mmap_mode="r", allow_pickle=False)
+    if raw.ndim != 2 or not isinstance(raw, np.memmap) or raw.flags.writeable:
+        raise ValueError("真实筛选要求二维只读 NPY mmap")
+    if (train_indices < 0).any() or (train_indices >= raw.shape[0]).any():
+        raise ValueError("训练索引越界")
+    n, p = len(train_indices), raw.shape[1]
+    if pheno_train.shape[0] != n:
+        raise ValueError("训练 phenotype 行数与训练索引不一致")
+
+    def dosage_block(start, stop):
+        block = np.asarray(raw[train_indices, start:stop])
+        missing = np.isnan(block) | (block == -1)
+        valid = (block == 0) | (block == 1) | (block == 2)
+        if not (missing | valid).all():
+            raise ValueError(f"SNP 列块 {start}:{stop} 含非法剂量")
+        counts = np.stack([np.count_nonzero(block == value, axis=0) for value in (0, 1, 2)])
+        if (counts.sum(axis=0) == 0).any():
+            raise ValueError("训练个体中存在全缺失 SNP，mode 无法拟合")
+        fill = counts.argmax(axis=0).astype(np.int8)
+        return np.where(missing, fill[None, :], block).astype(np.float64, copy=False)
+
+    started = time.perf_counter()
+    panel_count = min(p, pca_marker_count)
+    panel_indices = np.linspace(0, p - 1, panel_count, dtype=np.int64)
+    panel = np.asarray(raw[np.ix_(train_indices, panel_indices)])
+    panel_missing = np.isnan(panel) | (panel == -1)
+    panel_valid = (panel == 0) | (panel == 1) | (panel == 2)
+    if not (panel_missing | panel_valid).all():
+        raise ValueError("PCA marker panel 含非法剂量")
+    panel_counts = np.stack([
+        np.count_nonzero(panel == value, axis=0) for value in (0, 1, 2)
+    ])
+    if (panel_counts.sum(axis=0) == 0).any():
+        raise ValueError("PCA marker panel 含训练集全缺失列")
+    panel_fills = panel_counts.argmax(axis=0)
+    panel = np.where(panel_missing, panel_fills[None, :], panel).astype(np.float64)
+    panel_center = panel.mean(axis=0)
+    panel_variances = panel.var(axis=0)
+    n_pc = min(n_pcs, min(n, p) - 2)
+    pcs = PCA(n_components=n_pc, svd_solver="randomized", random_state=42).fit_transform(panel)
+    pca_seconds = time.perf_counter() - started
+
+    if multivariate:
+        traits = np.concatenate([
+            _extract_dynamic_traits(pheno_train[:, i, :], True)
+            for i in range(pheno_train.shape[1])], axis=1)
+    else:
+        traits = _extract_dynamic_traits(pheno_train.reshape(n, -1), True)
+    design = np.column_stack([np.ones(n), pcs])
+    q, _ = np.linalg.qr(design)
+    y_res = traits - q @ (q.T @ traits)
+    y_res_sq = (y_res ** 2).sum(axis=0)
+    df = n - design.shape[1] - 1
+    if df <= 0:
+        raise ValueError("训练样本不足以执行 GWAS")
+
+    selected_idx = np.empty(0, dtype=np.int64)
+    selected_score = np.empty(0, dtype=np.float64)
+    gwas_started = time.perf_counter()
+    keep = min(gwas_k, p)
+    for start in range(0, p, block_columns):
+        stop = min(p, start + block_columns)
+        block = dosage_block(start, stop)
+        residual = block - q @ (q.T @ block)
+        residual_sq = np.maximum((residual ** 2).sum(axis=0), 1e-20)
+        numerator = residual.T @ y_res
+        beta = numerator / residual_sq[:, None]
+        rss = np.maximum(y_res_sq[None, :] - beta * numerator, 1e-20)
+        se = np.sqrt(np.maximum((rss / df) / residual_sq[:, None], 1e-30))
+        p_values = 2 * stats.t.sf(np.abs(beta / np.maximum(se, 1e-30)), df=df)
+        scores = np.nan_to_num(p_values, nan=1., posinf=1., neginf=1.).min(axis=1)
+        indices = np.arange(start, stop, dtype=np.int64)
+        combined_score = np.concatenate([selected_score, scores])
+        combined_idx = np.concatenate([selected_idx, indices])
+        if len(combined_score) > keep:
+            chosen = np.argpartition(combined_score, keep - 1)[:keep]
+            selected_score, selected_idx = combined_score[chosen], combined_idx[chosen]
+        else:
+            selected_score, selected_idx = combined_score, combined_idx
+    ranked = np.argsort(selected_score, kind="stable")
+    gwas_indices = selected_idx[ranked]
+    gwas_seconds = time.perf_counter() - gwas_started
+
+    candidates = np.asarray(raw[np.ix_(train_indices, gwas_indices)])
+    missing = np.isnan(candidates) | (candidates == -1)
+    counts = np.stack([np.count_nonzero(candidates == value, axis=0) for value in (0, 1, 2)])
+    if (counts.sum(axis=0) == 0).any():
+        raise ValueError("GWAS 候选含训练集全缺失列")
+    fills = counts.argmax(axis=0)
+    candidates = np.where(missing, fills[None, :], candidates).astype(np.float32)
+    dc_target = (_multivariate_pheno_matrix(pheno_train, logger=logger)
+                 if multivariate else pheno_train[:, 0, :])
+    dc_started = time.perf_counter()
+    local, _ = dc_sis_screen(candidates, dc_target, min(screen_k, len(gwas_indices)),
+                             verbose=True, logger=logger)
+    final = gwas_indices[local].astype(np.int64)
+    dc_seconds = time.perf_counter() - dc_started
+    candidate_original_order = np.argsort(gwas_indices)
+    stable_candidate_scores = np.round(
+        selected_score[ranked][candidate_original_order], decimals=12)
+    return final, {
+        "algorithm": "streaming_train_mode_gwas_fwl_dc_sis_v2",
+        "mmap": True, "block_columns": block_columns, "n_train": n,
+        "training_indices_sha256": training_indices_hash(train_indices),
+        "gwas_population_structure": "pca",
+        "gwas_n_pcs": n_pc,
+        "pca_marker_count": panel_count,
+        "gwas_pca_panel_size": pca_marker_count,
+        "gwas_pca_panel_seed": None,
+        "gwas_pca_algorithm_version": "sklearn_randomized_centered_even_panel_v1",
+        "pca_marker_selection": "evenly_spaced_original_columns_label_free_v1",
+        "pca_scaling": "center_only_no_standard_deviation",
+        "pca_zero_variance_marker_count": int(np.count_nonzero(panel_variances == 0)),
+        "pca_train_mode_fill_sha256": array_fingerprint(panel_fills.astype("<i8")),
+        "pca_train_center_sha256": array_fingerprint(panel_center.astype("<f8")),
+        "pca_panel_indices": panel_indices.tolist(),
+        "pca_panel_indices_sha256": array_fingerprint(panel_indices.astype("<i8")),
+        "pca_scores_sha256": array_fingerprint(pcs.astype("<f8")),
+        "gwas_candidate_scores_sha256": array_fingerprint(
+            stable_candidate_scores.astype("<f8")),
+        "gwas_score_hash_round_decimals": 12,
+        "original_snp_dim": p, "gwas_candidates": len(gwas_indices),
+        "selected_count": len(final), "pca_seconds": pca_seconds,
+        "gwas_seconds": gwas_seconds, "dc_sis_seconds": dc_seconds,
+        "full_matrix_copy_created": False,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 统一筛选入口（多表型 + 两阶段 + 缓存）
 # ---------------------------------------------------------------------------
@@ -502,6 +672,7 @@ def screen_snps(
     cache_dir: str = "dataset/screen_cache",
     verbose: bool = True,
     logger=None,
+    n_pcs: int = 5,
 ) -> np.ndarray | None:
     """统一 SNP 筛选入口：多表型 + 两阶段串联 + 磁盘缓存。
 
@@ -577,6 +748,7 @@ def screen_snps(
                 snp_train,
                 pheno_train,
                 k=gwas_k,
+                n_pcs=n_pcs,
                 multivariate=True,
                 verbose=verbose,
                 logger=logger,
@@ -593,7 +765,8 @@ def screen_snps(
                 if verbose:
                     _log(logger, f"  表型 {i + 1}/{n_pheno}:")
                 idx_i, _ = gwas_screen(
-                    snp_train, pheno_i, k=gwas_k, verbose=verbose, logger=logger
+                    snp_train, pheno_i, k=gwas_k, n_pcs=n_pcs,
+                    verbose=verbose, logger=logger
                 )
                 gwas_sets.append(idx_i)
             gwas_union = np.unique(np.concatenate(gwas_sets))
