@@ -101,12 +101,107 @@ numpy == 1.23.5
 scipy == 1.10.1
 pandas == 2.0.3
 scikit-learn == 1.3.2
+xgboost == 3.0.5
 pydantic >= 2.13
 matplotlib == 3.8.2
 seaborn == 0.13.2
 ```
 
 ## 数据集准备
+
+### 完整模拟数据准备（第一阶段）
+
+R 模拟在独立环境中运行，环境只包含当前脚本所需依赖：
+
+```bash
+conda env create -f environment/dynags-r.yml
+conda run -n dynags-r Rscript r/generate_simulation.R \
+  --output_dir /root/DynaGS/dataset/sim_data/staging/scenario_smoke/rep_01 \
+  --scenario smoke --rep 1 --n_samples 100 --n_snps 200 \
+  --n_qtl 20 --n_timepoints 20 --heritability 0.5 --ld 0.3 --seed 73
+```
+
+R 每次只输出一份完整的基因型、表型、SampleID 和独立真值文件，不划分
+Train/Val/Test。随后由 Python 调用公共 `utils.Split` 生成或读取个体划分：
+
+```bash
+uv run python prepare_simulation.py \
+  --input_dir /root/DynaGS/dataset/sim_data/staging/scenario_smoke/rep_01 \
+  --output_dir /root/DynaGS/dataset/sim_data/tfpp_ready/scenario_smoke/rep_01 \
+  --seed 73 --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1
+
+uv run python validate_simulation.py \
+  --data_dir /root/DynaGS/dataset/sim_data/tfpp_ready/scenario_smoke/rep_01
+```
+
+需要继续检查实际筛选、训练、checkpoint 和推理时，按
+[`docs/SIMULATION_DEBUG_WORKFLOW.md`](docs/SIMULATION_DEBUG_WORKFLOW.md) 的小规模端到端流程执行。
+
+准备结果中的 `genotype.npy` 保持 `0/1/2` 剂量；模型类别转换仍由
+`TFPPDataset` 完成。`truth/` 下的 TrueGV 与真实效应只用于事后评估，不在
+Dataset 或 DataLoader 输入列表中。所有入口默认拒绝覆盖已有目录。旧
+`SimTFPPDataset`、`SimTFPPTrainer` 和 `SimTFPPConfig` 仅保留弃用别名；新模拟
+实验直接使用主 TFPP 管线。
+
+### 动态非线性遗传场景：传统模型、RF 与 XGBoost
+
+该比较必须称为“动态非线性遗传场景”，其结论只适用于这一个预注册场景，
+不能声称代表所有遗传结构。场景固定为 N=5000、P=20000、T=30、h²=0.8、
+200 个 QTL、100 组动态上位互作，并统一使用 seed 73 生成的同一份
+4000/500/500 个体划分。
+
+生成完整模拟数据：
+
+```bash
+conda run -n dynags-r Rscript r/generate_simulation.R \
+  --output_dir /root/DynaGS/dataset/sim_data/staging/scenario_tfpp_dynamic/rep_01 \
+  --scenario tfpp_dynamic \
+  --rep 1 \
+  --n_samples 5000 \
+  --n_snps 20000 \
+  --n_qtl 200 \
+  --n_timepoints 30 \
+  --heritability 0.8 \
+  --ld 0.3 \
+  --dominance_ratio 0.7 \
+  --prop_add 0.1 \
+  --prop_dom 0.2 \
+  --prop_mixed 0.7 \
+  --n_epistasis 100 \
+  --epistasis_strength 1.5 \
+  --seed 73
+```
+
+只生成一次固定划分：
+
+```bash
+uv run python prepare_simulation.py \
+  --input_dir /root/DynaGS/dataset/sim_data/staging/scenario_tfpp_dynamic/rep_01 \
+  --output_dir /root/DynaGS/dataset/sim_data/tfpp_ready/scenario_tfpp_dynamic/rep_01 \
+  --seed 73 \
+  --train_ratio 0.8 \
+  --val_ratio 0.1 \
+  --test_ratio 0.1
+```
+
+安装新增的 XGBoost 依赖后运行比较：
+
+```bash
+uv sync
+uv run python train_baseline.py
+```
+
+本阶段只比较 Train-Mean、Ridge-All、Ridge-A+D、GBLUP-All、RF 和 XGBoost，
+不运行 TFPP。除不读取 SNP 的 Train-Mean 外，所有模型直接使用完整原始 SNP；
+不读取筛选索引。Ridge-A+D 的显性编码由每个原始 SNP 派生，RF/XGBoost 的内部
+列采样属于模型训练，不是预先筛选数据。训练预处理只在 train 上拟合，Ridge/GBLUP
+用 val 选正则参数，XGBoost 用 val 早停，test 只评估一次。
+
+正式结果为
+`outputs/baseline_comparison/scenario_tfpp_dynamic/rep_01/comparison_summary.csv`，
+且只含 `model | PCC ↑ | R² ↑ | RMSE ↓ | MAE ↓ | True-GV PCC ↑ | Runtime (s) ↓`。
+各模型目录中的预测和 `protocol.json` 用于核验所有模型使用了相同 split；True-GV
+只在模型和参数冻结后计算诊断 PCC，不进入拟合或选参。
 
 ### 数据目录结构
 
@@ -158,11 +253,11 @@ dataset/maize/
 `TrainingDosageImputer.fit(dosage, train_idx=...)` 在指定训练个体上拟合逐位点众数，
 并列选择较小的观测剂量，训练中整列缺失则报错。`metadata_` 记录训练行号、缺失计数、
 填充值和编码版本，可随实验保存为 JSON。缺失可以经显式众数策略填为0，但不会自动当作观测剂量0。
-普通 TFPP 与每个 K 折实验均在固定划分后接入 mode，仅用当前 train 个体拟合；模拟筛选仍不自动 fit。
+普通 TFPP、每个 K 折实验和准备后的模拟数据均在固定划分后接入 mode，仅用当前 train 个体拟合。
 
-真实管线在筛选前显式解码模型类别；模拟管线使用相同剂量筛选，进入模型时统一转为四类别码，
-`SimTFPPConfig.num_embeddings` 默认改为4。旧三类别模拟 checkpoint 仍依赖旧编码，
-不能与新编码管线混用。普通/折内 TFPP 均在划分后筛选；模拟训练暂保持旧流程。
+真实与模拟管线都在筛选前显式解码模型类别，使用相同剂量筛选，并在进入模型时统一转为
+四类别码。旧三类别模拟 checkpoint 仍依赖旧编码，不能与新编码管线混用。普通、折内与
+模拟 TFPP 均在固定划分后筛选。
 
 `screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练可显式传
 `--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。

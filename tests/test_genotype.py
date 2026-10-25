@@ -38,6 +38,7 @@ from utils.Screening import (
     gwas_screen,
     screen_snps,
 )
+from utils.Split import generate_split
 
 
 class GenotypeTests(unittest.TestCase):
@@ -176,37 +177,30 @@ class GenotypeTests(unittest.TestCase):
             )
 
     def test_real_and_simulated_pipelines_screen_identical_dosage(self):
-        snp_path, paths = self.write_inputs()
+        snp_path, _ = self.write_inputs()
         dataset = TFPPDataset(snp_path, str(self.root), ["toy"])
         with redirect_stdout(io.StringIO()):
             real_indices = screen_snps(
                 model_codes_to_dosage(dataset.snp), dataset.phenotype,
                 screen_k=4, gwas_k=4, multivariate=True, verbose=False,
             )
-        with (
-            redirect_stdout(io.StringIO()),
-            patch("dataloader.Sim_DataLoader.compute_cache_key", return_value=None),
-            patch(
-                "dataloader.Sim_DataLoader.screen_snps", wraps=screen_snps
-            ) as sim_screen,
-            patch.object(
-                TrainingDosageImputer, "fit", side_effect=AssertionError("禁止生产fit")
-            ),
-        ):
-            simulated = SimTFPPDataset(
-                **paths, phenotype_names=["toy"], screen_k=4, gwas_k=4
-            )
-        np.testing.assert_array_equal(sim_screen.call_args.args[0], self.dosage)
+        with self.assertWarns(DeprecationWarning):
+            simulated = SimTFPPDataset(snp_path, str(self.root), ["toy"])
+        np.testing.assert_array_equal(dataset.snp, simulated.snp)
         np.testing.assert_array_equal(
-            model_codes_to_dosage(dataset.snp)[:, real_indices], simulated.snp_train
+            model_codes_to_dosage(simulated.snp)[:, real_indices],
+            self.dosage[:, real_indices],
         )
-        self.assertTrue(sim_screen.call_args.kwargs["multivariate"])
-        loaders = get_sim_dataloader(simulated, 4, "global", "zscore", num_workers=0)
-        for loader, dosage in zip(
-            loaders[:3], (simulated.snp_train, simulated.snp_val, simulated.snp_test)
-        ):
+        split = generate_split(len(simulated))
+        with self.assertWarns(DeprecationWarning):
+            loaders = get_sim_dataloader(
+                simulated, 4, "global", "zscore", num_workers=0, indices=split
+            )
+        for loader, indices in zip(loaders[:3], (
+            split.train_idx, split.val_idx, split.test_idx
+        )):
             np.testing.assert_array_equal(
-                loader.dataset.tensors[0], dosage_to_model_codes(dosage)
+                loader.dataset.tensors[0], simulated.snp[indices]
             )
 
     def test_real_and_convae_dataset_preserve_missing_category(self):
@@ -223,14 +217,11 @@ class GenotypeTests(unittest.TestCase):
         np.testing.assert_array_equal(mae.snp[:, :12], dataset.snp)
         np.testing.assert_array_equal(mae.snp[:, 12:], 0)
 
-    def test_kfold_init_defers_fit_and_sim_missing_still_errors(self):
-        snp_path, paths = self.write_inputs()
+    def test_kfold_init_defers_fit_and_sim_uses_same_missing_category(self):
+        snp_path, _ = self.write_inputs()
         raw = self.dosage.astype(np.float32)
         raw[0, 0] = -1
         np.save(snp_path, raw)
-        frame = pd.read_csv(paths["train_snp_csv"])
-        frame.iloc[0, 1] = -1
-        frame.to_csv(paths["train_snp_csv"], index=False)
         real_module = importlib.import_module("trainer.TFPP_Trainer")
         with (
             patch.object(Path, "mkdir"),
@@ -247,19 +238,9 @@ class GenotypeTests(unittest.TestCase):
             self.assertIsNone(trainer.model)
             screen.assert_not_called()
             fit.assert_not_called()
-        with (
-            redirect_stdout(io.StringIO()),
-            patch("dataloader.Sim_DataLoader.compute_cache_key", return_value=None),
-            patch.object(TrainingDosageImputer, "fit") as fit,
-        ):
-            with self.assertRaisesRegex(ValueError, "禁止当作剂量0"):
-                SimTFPPDataset(
-                    **paths,
-                    phenotype_names=["toy"],
-                    screen_k=4,
-                    screen_missing_strategy="mode",
-                )
-            fit.assert_not_called()
+        with self.assertWarns(DeprecationWarning):
+            simulated = SimTFPPDataset(snp_path, str(self.root), ["toy"])
+        self.assertEqual(simulated.snp[0, 0], 0)
 
     def test_cli_defaults_and_explicit_overrides_have_one_source(self):
         import infer

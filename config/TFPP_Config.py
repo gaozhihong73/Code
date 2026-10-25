@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Literal
 
 import torch
-
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -108,10 +107,14 @@ class TFPPConfig(BaseModel):
     use_kfold: bool = False  # 是否使用K折交叉验证
     n_folds: int = Field(default=10, ge=2)  # 外层K折数量
     kfold_val_ratio: float = Field(
-        default=0.1, gt=0, lt=1,
+        default=0.1,
+        gt=0,
+        lt=1,
         description="外层 train 内再划分给早停验证集的比例，不使用 test 选模型",
     )
-    fold_index: int | None = Field(default=None, ge=1, description="内部折实验编号，从1开始")
+    fold_index: int | None = Field(
+        default=None, ge=1, description="内部折实验编号，从1开始"
+    )
 
     # 数据集参数
     train_ratio: float = 0.8
@@ -122,31 +125,49 @@ class TFPPConfig(BaseModel):
         default=None,
         description="个体划分 .npz 路径；已有文件优先，不存在则生成，auto 使用 splits/；仅普通训练",
     )
+    sample_ids_file: str | None = Field(
+        default=None,
+        description="可选 SampleID 单列 CSV；用于校验 split 中的个体身份与顺序",
+    )
 
     @model_validator(mode="after")
     def _validate_split_mode(self):
         if self.use_kfold and self.split_file is not None:
-            raise ValueError("split_file 为单次 train/val/test 划分，不能与 use_kfold 同时使用")
+            raise ValueError(
+                "split_file 为单次 train/val/test 划分，不能与 use_kfold 同时使用"
+            )
         if self.use_kfold and self.fold_index is not None:
             raise ValueError("fold_index 仅用于已确定划分的内部折实验")
         if self.run_stage == "engineering_pretest" and (
-            self.use_kfold or self.split_file in (None, "auto") or self.preselected_snp_file is None
+            self.use_kfold
+            or self.split_file in (None, "auto")
+            or self.preselected_snp_file is None
         ):
-            raise ValueError("engineering_pretest 必须使用显式 split_file 和预选原始 SNP 索引，且不支持 K 折")
+            raise ValueError(
+                "engineering_pretest 必须使用显式 split_file 和预选原始 SNP 索引，且不支持 K 折"
+            )
         if self.run_stage == "full" and (
             self.gwas_pca_panel_size is not None
-            or self.gwas_pca_algorithm_version != "sklearn_centered_all_train_markers_v1"
+            or self.gwas_pca_algorithm_version
+            != "sklearn_centered_all_train_markers_v1"
         ):
-            raise ValueError("普通/K折GWAS固定使用当前训练矩阵全部列PCA；panel参数仅供engineering_pretest")
+            raise ValueError(
+                "普通/K折GWAS固定使用当前训练矩阵全部列PCA；panel参数仅供engineering_pretest"
+            )
         if self.run_stage == "engineering_pretest" and (
             self.gwas_pca_panel_size is None
             or self.gwas_pca_panel_seed is not None
-            or self.gwas_pca_algorithm_version != "sklearn_randomized_centered_even_panel_v1"
+            or self.gwas_pca_algorithm_version
+            != "sklearn_randomized_centered_even_panel_v1"
         ):
-            raise ValueError("engineering_pretest 必须显式记录evenly-spaced PCA panel；该算法不使用panel seed")
+            raise ValueError(
+                "engineering_pretest 必须显式记录evenly-spaced PCA panel；该算法不使用panel seed"
+            )
         return self
 
-    preselected_snp_file: str | None = Field(default=None, description="runner 已保存的原始有序 SNP 列索引；不重做筛选")
+    preselected_snp_file: str | None = Field(
+        default=None, description="runner 已保存的原始有序 SNP 列索引；不重做筛选"
+    )
 
     # SNP 特征筛选参数 (0=不筛选)
     screen_k: int = Field(
@@ -162,28 +183,32 @@ class TFPPConfig(BaseModel):
     gwas_population_structure: Literal["pca"] = "pca"
     gwas_n_pcs: int = Field(default=5, ge=1)
     gwas_pca_panel_size: int | None = Field(
-        default=None, ge=1,
+        default=None,
+        ge=1,
         description="None=普通/K折GWAS使用当前训练矩阵全部列；工程pretest显式使用固定panel",
     )
     gwas_pca_panel_seed: int | None = Field(
-        default=None, ge=0,
+        default=None,
+        ge=0,
         description="随机panel时使用；当前evenly-spaced算法不使用随机数，必须为None",
     )
     gwas_pca_algorithm_version: str = "sklearn_centered_all_train_markers_v1"
     gwas_pca_panel_indices_file: str | None = None
     gwas_pca_panel_indices_sha256: str | None = Field(
-        default=None, pattern="^[0-9a-f]{64}$")
+        default=None, pattern="^[0-9a-f]{64}$"
+    )
     screen_multivariate: bool = Field(
         default=True,
         description="DC-SIS 多元模式: True=多表型拼接联合筛选, False=逐表型筛选取并集",
     )
     screen_missing_strategy: str = Field(
-        default="error",
+        default="mode",
         pattern="^(error|mode)$",
         description="筛选缺失策略：error=拒绝，mode=仅在当前普通/折内 train_idx 上拟合众数",
     )
     wide_missing_strategy: str = Field(
-        default="mode", pattern="^(error|mode)$",
+        default="mode",
+        pattern="^(error|mode)$",
         description="普通/折内 Wide 剂量缺失策略，独立于筛选；mode 仅在训练个体拟合",
     )
     screen_cache_dir: str = "dataset/screen_cache"

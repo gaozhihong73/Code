@@ -41,7 +41,11 @@ from utils.Screening import (
     training_indices_hash,
 )
 from utils.Split import (
-    IndividualSplit, default_split_path, load_or_create_split, load_split, save_split,
+    IndividualSplit,
+    default_split_path,
+    load_or_create_split,
+    load_split,
+    save_split,
     split_from_indices,
 )
 
@@ -72,12 +76,22 @@ class TFPPTrainer:
         self.config = config
         self.run_stage = config.run_stage
         existing = Path(config.output_dir)
-        if (existing / "models/best_model.pt").exists() or (existing / "test_evaluation.json").exists():
-            raise FileExistsError("实验已有 checkpoint/test 预约，禁止覆盖或再次观察 test；请使用新实验目录或 runner --resume")
+        if (existing / "models/best_model.pt").exists() or (
+            existing / "test_evaluation.json"
+        ).exists():
+            raise FileExistsError(
+                "实验已有 checkpoint/test 预约，禁止覆盖或再次观察 test；请使用新实验目录或 runner --resume"
+            )
 
         # 保存目录参数
         self.pheno_dir = self.config.pheno_dir
         self.snp_file = self.config.snp_file
+        self.sample_ids = None
+        if self.config.sample_ids_file is not None:
+            sample_frame = pd.read_csv(self.config.sample_ids_file, dtype=str)
+            if list(sample_frame.columns) != ["SampleID"]:
+                raise ValueError("sample_ids_file 必须且只能包含 SampleID 列")
+            self.sample_ids = sample_frame["SampleID"].tolist()
 
         self.best_model_save_dir = Path(config.best_model_save_dir)
         self.best_model_save_dir.mkdir(parents=True, exist_ok=True)
@@ -99,10 +113,18 @@ class TFPPTrainer:
         self._pretest_snp_indices = None
         if self.run_stage == "engineering_pretest":
             raw = np.load(config.snp_file, mmap_mode="r", allow_pickle=False)
-            self._pretest_split = load_split(config.split_file, n_samples=raw.shape[0])
-            self._pretest_snp_indices = np.load(config.preselected_snp_file, allow_pickle=False)
-            allowed_rows = np.concatenate([
-                self._pretest_split.train_idx, self._pretest_split.val_idx])
+            identity = (
+                {"n_samples": raw.shape[0]}
+                if self.sample_ids is None
+                else {"sample_ids": self.sample_ids}
+            )
+            self._pretest_split = load_split(config.split_file, **identity)
+            self._pretest_snp_indices = np.load(
+                config.preselected_snp_file, allow_pickle=False
+            )
+            allowed_rows = np.concatenate(
+                [self._pretest_split.train_idx, self._pretest_split.val_idx]
+            )
             self.dataset = self._create_dataset(
                 snp_indices=self._pretest_snp_indices,
                 phenotype_row_indices=allowed_rows,
@@ -201,18 +223,34 @@ class TFPPTrainer:
         ratios = (self.train_ratio, self.val_ratio, self.test_ratio)
         split_path = self.config.split_file
         if split_path is None or split_path == "auto":
+            sample_ids = getattr(self, "sample_ids", None)
             split_path = default_split_path(
-                self.num_sample, ratios=ratios, seed=self.seed
+                None if sample_ids is not None else self.num_sample,
+                sample_ids=sample_ids,
+                ratios=ratios,
+                seed=self.seed,
             )
         pretest_split = getattr(self, "_pretest_split", None)
-        self.split = (pretest_split if pretest_split is not None else
-                      load_or_create_split(split_path, self.num_sample, ratios=ratios, seed=self.seed))
+        sample_ids = getattr(self, "sample_ids", None)
+        split_identity = (
+            {"n_samples": self.num_sample}
+            if sample_ids is None
+            else {"sample_ids": sample_ids}
+        )
+        self.split = (
+            pretest_split
+            if pretest_split is not None
+            else load_or_create_split(
+                split_path, ratios=ratios, seed=self.seed, **split_identity
+            )
+        )
         train_idx = self.split.train_idx
         if min(len(train_idx), len(self.split.val_idx), len(self.split.test_idx)) == 0:
             raise ValueError("普通训练要求 train/val/test 均非空")
         self.logger.info(
             f"固定划分: {split_path}, seed={self.split.metadata['seed']}, "
-            f"比例={self.split.metadata['ratios']}, sample_id_source=row_index"
+            f"比例={self.split.metadata['ratios']}, "
+            f"sample_id_source={self.split.metadata['sample_id_source']}"
         )
         # 只提取训练行；不对完整 phenotype 做统计或建立标签相关指纹。
         train_codes = self.dataset.snp[train_idx]
@@ -226,9 +264,13 @@ class TFPPTrainer:
             self.screen_k,
             self.gwas_k,
             self.seed,
-            split_info=("regular" if self.config.fold_index is None
-                        else f"kfold:fold_{self.config.fold_index:02d}")
-            + ":" + self.split.metadata["sample_ids_sha256"],
+            split_info=(
+                "regular"
+                if self.config.fold_index is None
+                else f"kfold:fold_{self.config.fold_index:02d}"
+            )
+            + ":"
+            + self.split.metadata["sample_ids_sha256"],
             multivariate=self.screen_multivariate,
             missing_strategy=self.screen_missing_strategy,
             gwas_population_structure=self.config.gwas_population_structure,
@@ -304,18 +346,26 @@ class TFPPTrainer:
 
         if self.run_stage == "engineering_pretest":
             self.train_loader, self.val_loader, self.scalers = get_train_val_dataloader(
-                self.dataset, self.split, self.batch_size, self.norm_method,
-                self.scaler_type, device=self.device, num_workers=self.num_workers)
-            self.test_loader = None
-        else:
-            self.train_loader, self.val_loader, self.test_loader, self.scalers = get_dataloader(
                 self.dataset,
+                self.split,
                 self.batch_size,
                 self.norm_method,
                 self.scaler_type,
                 device=self.device,
                 num_workers=self.num_workers,
-                indices=self.split,
+            )
+            self.test_loader = None
+        else:
+            self.train_loader, self.val_loader, self.test_loader, self.scalers = (
+                get_dataloader(
+                    self.dataset,
+                    self.batch_size,
+                    self.norm_method,
+                    self.scaler_type,
+                    device=self.device,
+                    num_workers=self.num_workers,
+                    indices=self.split,
+                )
             )
         save_scalers(self.scalers, self.scaler_file)
         artifacts = Path(self.config.preprocessing_save_dir)
@@ -329,7 +379,11 @@ class TFPPTrainer:
             "schema_version": 3,
             "training_mode": "regular" if self.config.fold_index is None else "kfold",
             "run_stage": self.run_stage,
-            "purpose": ("engineering_pretest_smoke" if self.run_stage == "engineering_pretest" else "model_training"),
+            "purpose": (
+                "engineering_pretest_smoke"
+                if self.run_stage == "engineering_pretest"
+                else "model_training"
+            ),
             "paper_eligible": self.run_stage == "full",
             "fold_index": self.config.fold_index,
             "model_initialization_seed": self.seed,
@@ -349,11 +403,15 @@ class TFPPTrainer:
             "screened_indices_sha256": hashlib.sha256(
                 (artifacts / "screened_indices.npy").read_bytes()
             ).hexdigest(),
-            "scaler_sha256": hashlib.sha256(Path(self.scaler_file).read_bytes()).hexdigest(),
-            "wide_fill_values_sha256": array_fingerprint(np.asarray(
-                [] if self.wide_fill_values is None else self.wide_fill_values,
-                dtype=np.float32,
-            )),
+            "scaler_sha256": hashlib.sha256(
+                Path(self.scaler_file).read_bytes()
+            ).hexdigest(),
+            "wide_fill_values_sha256": array_fingerprint(
+                np.asarray(
+                    [] if self.wide_fill_values is None else self.wide_fill_values,
+                    dtype=np.float32,
+                )
+            ),
             "screen_k": self.screen_k,
             "gwas_k": self.gwas_k,
             "gwas_population_structure": self.config.gwas_population_structure,
@@ -376,8 +434,11 @@ class TFPPTrainer:
             else screening_imputer.metadata_,
             "wide_input_mode": "dosage_v1",
             "wide_imputer": wide_metadata,
-            "phenotype_rows_parsed": ([rows.tolist() for rows in self.dataset.parsed_phenotype_rows]
-                                      if self.run_stage == "engineering_pretest" else None),
+            "phenotype_rows_parsed": (
+                [rows.tolist() for rows in self.dataset.parsed_phenotype_rows]
+                if self.run_stage == "engineering_pretest"
+                else None
+            ),
         }
         (artifacts / "preprocessing.json").write_text(
             json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2),
@@ -418,7 +479,10 @@ class TFPPTrainer:
         """
         获取数据集对象
         """
-        return TFPPDataset(self.snp_file, self.pheno_dir, self.phenotype_names, **kwargs)
+        kwargs.setdefault("sample_ids", self.sample_ids)
+        return TFPPDataset(
+            self.snp_file, self.pheno_dir, self.phenotype_names, **kwargs
+        )
 
     def _create_loss(self):
         """根据配置创建损失函数。"""
@@ -437,7 +501,7 @@ class TFPPTrainer:
     def _create_optimizer_and_scheduler(self):
         """创建优化器与学习率调度器"""
         base_lr = self.lr
-        wide_lr_scale = 0.1
+        wide_lr_scale = 1.0
         wide_wd_scale = 1.0
 
         wide_params = []
@@ -641,7 +705,13 @@ class TFPPTrainer:
         """
         reservation = Path(self.config.output_dir) / "test_evaluation.json"
         with reservation.open("x", encoding="utf-8") as handle:
-            json.dump({"test_evaluation_count": 1, "train_indices_sha256": self.train_indices_sha256}, handle)
+            json.dump(
+                {
+                    "test_evaluation_count": 1,
+                    "train_indices_sha256": self.train_indices_sha256,
+                },
+                handle,
+            )
         self.model.eval()
         all_preds = []
         all_targets = []
@@ -873,10 +943,20 @@ class TFPPTrainer:
             self.model.load_state_dict(best_model_state)
             if self.is_save_training_info:
                 self._save_model_info(
-                    best_model_state, best_val_loss, best_epoch, best_val_metrics,
-                    best_val_pheno_metrics, training_time, train_loss_history,
-                    val_loss_history, train_metrics_history, val_metrics_history,
-                    val_pheno_metrics_history, final_lr, None)
+                    best_model_state,
+                    best_val_loss,
+                    best_epoch,
+                    best_val_metrics,
+                    best_val_pheno_metrics,
+                    training_time,
+                    train_loss_history,
+                    val_loss_history,
+                    train_metrics_history,
+                    val_metrics_history,
+                    val_pheno_metrics_history,
+                    final_lr,
+                    None,
+                )
             return {
                 "best_val_loss": best_val_loss,
                 "best_val_metrics": best_val_metrics,
@@ -1036,16 +1116,34 @@ class TFPPTrainer:
                 json.dump(_mc, _f, ensure_ascii=False, indent=2)
 
         from utils.ArtifactIntegrity import CHECKPOINT_PROTOCOL, seal_checkpoint
+
         self.preprocessing_metadata["checkpoint_protocol"] = CHECKPOINT_PROTOCOL
         Path(self.config.preprocessing_save_dir, "preprocessing.json").write_text(
-            json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(self.preprocessing_metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         engineering_extras = ["preprocessing/screened_indices.npy"]
         if self.config.gwas_pca_panel_indices_file is not None:
             engineering_extras.append(self.config.gwas_pca_panel_indices_file)
+        save_regular_predictions = (
+            test_results is not None and self.config.fold_index is None
+        )
+        if save_regular_predictions:
+            self._save_regular_test_predictions()
         seal_checkpoint(
             self.config.output_dir,
-            extra_files=(tuple(engineering_extras) if test_results is None else
-                         ("test_evaluation.json", "preprocessing/screened_indices.npy")),
+            extra_files=(
+                tuple(engineering_extras)
+                if test_results is None
+                else (
+                    "test_evaluation.json",
+                    "test_predictions.npz",
+                    "test_predictions.csv",
+                    "preprocessing/screened_indices.npy",
+                )
+                if save_regular_predictions
+                else ("test_evaluation.json", "preprocessing/screened_indices.npy")
+            ),
         )
 
         # ==========================================
@@ -1060,7 +1158,11 @@ class TFPPTrainer:
             "best_val_metrics": best_val_metrics,
             "best_val_pheno_metrics": best_val_pheno_metrics,
             "test_results": test_results,
-            "purpose": ("engineering_pretest_smoke" if test_results is None else "model_training"),
+            "purpose": (
+                "engineering_pretest_smoke"
+                if test_results is None
+                else "model_training"
+            ),
             "paper_eligible": test_results is not None,
         }
 
@@ -1132,24 +1234,60 @@ class TFPPTrainer:
             df_metric.to_csv(metric_file, index=False)
             self.logger.info(f"【各表型 {metric.upper()} 历史】已保存至: {metric_file}")
 
+    def _save_regular_test_predictions(self) -> None:
+        """保存常规训练最终测试的同一遍输出，供配对基线比较。"""
+        test_idx = self.split.test_idx
+        sample_ids = np.asarray(self.split.metadata["sample_ids"])[test_idx]
+        directory = Path(self.config.output_dir)
+        np.savez_compressed(
+            directory / "test_predictions.npz",
+            sample_idx=test_idx,
+            sample_id=sample_ids,
+            phenotype_names=np.asarray(self.phenotype_names),
+            time_coordinates=np.asarray(self.time_coordinates),
+            **self.test_predictions,
+        )
+        rows = []
+        for i, idx in enumerate(test_idx):
+            for p, name in enumerate(self.phenotype_names):
+                row = {
+                    "sample_idx": int(idx),
+                    "sample_id": sample_ids[i],
+                    "phenotype": name,
+                }
+                for t in range(len(self.time_coordinates)):
+                    row[f"T{t + 1}_Pred"] = self.test_predictions["predictions"][i, p, t]
+                    row[f"T{t + 1}_True"] = self.test_predictions["targets"][i, p, t]
+                rows.append(row)
+        pd.DataFrame(rows).to_csv(directory / "test_predictions.csv", index=False)
+
     def _kfold_splits(self) -> list[IndividualSplit]:
         """外层 KFold 的 test 只评分；outer train 内独立划出早停 val。"""
         kfold = KFold(n_splits=self.n_folds, shuffle=True, random_state=self.seed)
         splits = []
-        for fold, (outer_train, test_idx) in enumerate(kfold.split(np.arange(self.num_sample)), 1):
+        for fold, (outer_train, test_idx) in enumerate(
+            kfold.split(np.arange(self.num_sample)), 1
+        ):
             try:
                 train_idx, val_idx = train_test_split(
-                    outer_train, test_size=self.config.kfold_val_ratio,
+                    outer_train,
+                    test_size=self.config.kfold_val_ratio,
                     random_state=self.seed + fold - 1,
                 )
             except ValueError as error:
-                raise ValueError("折内 train/val 无法划分，请增加样本或调整 kfold_val_ratio") from error
-            split = split_from_indices(train_idx, val_idx, test_idx, self.num_sample, seed=self.seed)
+                raise ValueError(
+                    "折内 train/val 无法划分，请增加样本或调整 kfold_val_ratio"
+                ) from error
+            split = split_from_indices(
+                train_idx, val_idx, test_idx, self.num_sample, seed=self.seed
+            )
             if min(len(split.train_idx), len(split.val_idx), len(split.test_idx)) == 0:
                 raise ValueError("每折 train/val/test 均须非空")
             split.metadata.update(
-                generator="sklearn_kfold_inner_shuffle_split_v1", fold_index=fold,
-                n_folds=self.n_folds, kfold_val_ratio=self.config.kfold_val_ratio,
+                generator="sklearn_kfold_inner_shuffle_split_v1",
+                fold_index=fold,
+                n_folds=self.n_folds,
+                kfold_val_ratio=self.config.kfold_val_ratio,
                 validation_seed=self.seed + fold - 1,
             )
             splits.append(split)
@@ -1160,24 +1298,40 @@ class TFPPTrainer:
 
     def _prepare_fold(self, fold_index: int, split: IndividualSplit) -> "TFPPTrainer":
         """实例化独立 TFPPTrainer，复用普通训练的预处理、双视图和模型创建顺序。"""
-        if (not 1 <= fold_index <= self.n_folds
-                or split.metadata.get("fold_index") != fold_index):
+        if (
+            not 1 <= fold_index <= self.n_folds
+            or split.metadata.get("fold_index") != fold_index
+        ):
             raise ValueError("fold_index 必须与本折 split 一致且在外层折数范围内")
         options = self.config.model_dump()
         options.update(
             exp_name=f"{self.exp_name}/folds/fold_{fold_index:02d}",
-            use_kfold=False, fold_index=fold_index, split_file=None,
-            seed=self.seed + fold_index, is_save_training_info=True,
+            use_kfold=False,
+            fold_index=fold_index,
+            split_file=None,
+            seed=self.seed + fold_index,
+            is_save_training_info=True,
         )
         config = type(self.config).model_validate(options)
         split_path = Path(config.preprocessing_save_dir) / "split.npz"
         if split_path.exists():
             old = load_split(split_path, n_samples=self.num_sample)
-            if (any(not np.array_equal(getattr(old, key), getattr(split, key))
-                    for key in ("train_idx", "val_idx", "test_idx"))
-                    or any(old.metadata.get(key) != split.metadata.get(key) for key in
-                           ("fold_index", "n_folds", "kfold_val_ratio", "seed", "validation_seed"))):
-                raise ValueError(f"已有折划分与当前配置不一致，请使用新实验目录: {split_path}")
+            if any(
+                not np.array_equal(getattr(old, key), getattr(split, key))
+                for key in ("train_idx", "val_idx", "test_idx")
+            ) or any(
+                old.metadata.get(key) != split.metadata.get(key)
+                for key in (
+                    "fold_index",
+                    "n_folds",
+                    "kfold_val_ratio",
+                    "seed",
+                    "validation_seed",
+                )
+            ):
+                raise ValueError(
+                    f"已有折划分与当前配置不一致，请使用新实验目录: {split_path}"
+                )
         else:
             save_split(split, split_path)
         config = config.model_copy(update={"split_file": str(split_path)})
@@ -1192,18 +1346,27 @@ class TFPPTrainer:
         fold = self.config.fold_index
         directory = Path(self.config.output_dir)
         np.savez_compressed(
-            directory / "test_predictions.npz", sample_idx=test_idx, sample_id=sample_ids,
+            directory / "test_predictions.npz",
+            sample_idx=test_idx,
+            sample_id=sample_ids,
             fold=np.full(len(test_idx), fold, dtype=np.int64),
             phenotype_names=np.asarray(self.phenotype_names),
-            time_coordinates=np.asarray(self.time_coordinates), **self.test_predictions,
+            time_coordinates=np.asarray(self.time_coordinates),
+            **self.test_predictions,
         )
         rows = []
         for i, idx in enumerate(test_idx):
             for p, name in enumerate(self.phenotype_names):
-                row = {"sample_idx": int(idx), "sample_id": sample_ids[i],
-                       "fold": fold, "phenotype": name}
+                row = {
+                    "sample_idx": int(idx),
+                    "sample_id": sample_ids[i],
+                    "fold": fold,
+                    "phenotype": name,
+                }
                 for t in range(len(self.time_coordinates)):
-                    row[f"T{t + 1}_Pred"] = self.test_predictions["predictions"][i, p, t]
+                    row[f"T{t + 1}_Pred"] = self.test_predictions["predictions"][
+                        i, p, t
+                    ]
                     row[f"T{t + 1}_True"] = self.test_predictions["targets"][i, p, t]
                 rows.append(row)
         frame = pd.DataFrame(rows)
@@ -1218,78 +1381,124 @@ class TFPPTrainer:
         splits = self._kfold_splits()
         fold_results, prediction_frames = [], []
         all_metrics = {key: [] for key in ("mse", "rmse", "mae", "pcc", "r2")}
-        pheno_metrics = {name: {key: [] for key in all_metrics} for name in self.phenotype_names}
+        pheno_metrics = {
+            name: {key: [] for key in all_metrics} for name in self.phenotype_names
+        }
         start = time.time()
         for fold, split in enumerate(splits, 1):
-            self.logger.info(f"Fold {fold}/{self.n_folds}: Train={len(split.train_idx)}, "
-                             f"Val={len(split.val_idx)}, Test={len(split.test_idx)}")
+            self.logger.info(
+                f"Fold {fold}/{self.n_folds}: Train={len(split.train_idx)}, "
+                f"Val={len(split.val_idx)}, Test={len(split.test_idx)}"
+            )
             trainer = self._prepare_fold(fold, split)
             try:
-                result = trainer.train()  # 只用 val 选模型，恢复最佳权重后最终评估 test 一次。
+                result = (
+                    trainer.train()
+                )  # 只用 val 选模型，恢复最佳权重后最终评估 test 一次。
                 frame = trainer._save_fold_predictions()
                 prediction_frames.append(frame)
-                result.update(fold=fold, fold_dir=trainer.config.output_dir,
-                              train_indices_sha256=trainer.train_indices_sha256,
-                              screening_cache_key=trainer.screening_cache_key,
-                              snp_dim=trainer.snp_dim)
+                result.update(
+                    fold=fold,
+                    fold_dir=trainer.config.output_dir,
+                    train_indices_sha256=trainer.train_indices_sha256,
+                    screening_cache_key=trainer.screening_cache_key,
+                    snp_dim=trainer.snp_dim,
+                )
                 (Path(trainer.config.output_dir) / "metrics.json").write_text(
-                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8",
+                    json.dumps(result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
                 )
                 (Path(trainer.config.output_dir) / "config.json").write_text(
-                    trainer.config.model_dump_json(indent=2), encoding="utf-8",
+                    trainer.config.model_dump_json(indent=2),
+                    encoding="utf-8",
                 )
                 fold_results.append(result)
                 for key in all_metrics:
-                    all_metrics[key].append(result["test_results"]["denormalized"]["overall"][key])
+                    all_metrics[key].append(
+                        result["test_results"]["denormalized"]["overall"][key]
+                    )
                     for name in pheno_metrics:
                         pheno_metrics[name][key].append(
-                            result["test_results"]["denormalized"]["phenotypes"][name][key])
+                            result["test_results"]["denormalized"]["phenotypes"][name][
+                                key
+                            ]
+                        )
             finally:
                 for handler in list(trainer.logger.logger.handlers):
                     handler.close()
                     trainer.logger.logger.removeHandler(handler)
                 del trainer
+
         def stats(metrics):
             output = {}
             for key, values in metrics.items():
                 valid = np.asarray(values)[np.isfinite(values)]
-                output[key] = {"mean": float(valid.mean()) if len(valid) else float("nan"),
-                               "std": float(valid.std(ddof=0)) if len(valid) else float("nan"),
-                               "valid_count": int(len(valid)), "values": values}
+                output[key] = {
+                    "mean": float(valid.mean()) if len(valid) else float("nan"),
+                    "std": float(valid.std(ddof=0)) if len(valid) else float("nan"),
+                    "valid_count": int(len(valid)),
+                    "values": values,
+                }
             return output
+
         summary = {
             "metrics_protocol": "time_adjusted_r2_nan_pcc_v2",
-            "n_folds": self.n_folds, "outer_seed": self.seed,
+            "n_folds": self.n_folds,
+            "outer_seed": self.seed,
             "kfold_val_ratio": self.config.kfold_val_ratio,
-            "fold_results": fold_results, "overall_denorm_metrics": all_metrics,
+            "fold_results": fold_results,
+            "overall_denorm_metrics": all_metrics,
             "phenotype_denorm_metrics": pheno_metrics,
             "overall_statistics": stats(all_metrics),
-            "phenotype_statistics": {name: stats(values) for name, values in pheno_metrics.items()},
-            "std_ddof": 0, "total_time": time.time() - start,
+            "phenotype_statistics": {
+                name: stats(values) for name, values in pheno_metrics.items()
+            },
+            "std_ddof": 0,
+            "total_time": time.time() - start,
         }
         directory = self.training_history_save_dir
         (directory / "kfold_summary.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
-        pd.DataFrame([
-            {"fold": result["fold"], "best_epoch": result["best_epoch"],
-             "best_val_loss": result["best_val_loss"],
-             **result["test_results"]["denormalized"]["overall"]}
-            for result in fold_results
-        ]).to_csv(directory / "kfold_fold_details.csv", index=False)
-        pd.DataFrame([
-            {"Metric": key, "Mean": values["mean"], "Std": values["std"]}
-            for key, values in summary["overall_statistics"].items()
-        ]).to_csv(directory / "kfold_overall_stats.csv", index=False)
-        pd.DataFrame([
-            {"Phenotype": name, "Metric": key, "Mean": values["mean"], "Std": values["std"]}
-            for name, metrics in summary["phenotype_statistics"].items() for key, values in metrics.items()
-        ]).to_csv(directory / "kfold_phenotype_stats.csv", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "fold": result["fold"],
+                    "best_epoch": result["best_epoch"],
+                    "best_val_loss": result["best_val_loss"],
+                    **result["test_results"]["denormalized"]["overall"],
+                }
+                for result in fold_results
+            ]
+        ).to_csv(directory / "kfold_fold_details.csv", index=False)
+        pd.DataFrame(
+            [
+                {"Metric": key, "Mean": values["mean"], "Std": values["std"]}
+                for key, values in summary["overall_statistics"].items()
+            ]
+        ).to_csv(directory / "kfold_overall_stats.csv", index=False)
+        pd.DataFrame(
+            [
+                {
+                    "Phenotype": name,
+                    "Metric": key,
+                    "Mean": values["mean"],
+                    "Std": values["std"],
+                }
+                for name, metrics in summary["phenotype_statistics"].items()
+                for key, values in metrics.items()
+            ]
+        ).to_csv(directory / "kfold_phenotype_stats.csv", index=False)
         predictions = pd.concat(prediction_frames, ignore_index=True)
-        predictions = predictions.sort_values(["sample_idx", "phenotype"], kind="stable")
+        predictions = predictions.sort_values(
+            ["sample_idx", "phenotype"], kind="stable"
+        )
         predictions.to_csv(directory / "kfold_predictions.csv", index=False)
         for key, values in summary["overall_statistics"].items():
-            self.logger.info(f"K折 {key.upper()}: {values['mean']:.6f} ± {values['std']:.6f}")
+            self.logger.info(
+                f"K折 {key.upper()}: {values['mean']:.6f} ± {values['std']:.6f}"
+            )
         return summary
 
     def train(self) -> dict[str, Any]:
@@ -1322,7 +1531,9 @@ class TFPPTrainer:
         )
         if self.use_kfold:
             self.logger.info(f"    折数: {self.n_folds}")
-            self.logger.info(f"    外层 train 内验证比例: {self.config.kfold_val_ratio}")
+            self.logger.info(
+                f"    外层 train 内验证比例: {self.config.kfold_val_ratio}"
+            )
         else:
             self.logger.info(f"    train_ratio: {self.train_ratio}")
             self.logger.info(f"    val_ratio: {self.val_ratio}")
