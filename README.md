@@ -1,1114 +1,211 @@
-<p align="center">
-    <a href="https://github.com/gaozhihong73/DynaGP/releases">
-        <img src="https://img.shields.io/github/v/release/gaozhihong73/DynaGP?style=flat-plastic&color=007acc&include_prereleases" alt="Release">
-    </a>
-    <a href="https://github.com/gaozhihong73/DynaGP/blob/main/LICENSE">
-        <img src="https://img.shields.io/github/license/gaozhihong73/DynaGP?style=flat-plastic&color=42b883" alt="License">
-    </a>
-    <a href="https://github.com/gaozhihong73/DynaGP/commits/main">
-        <img src="https://img.shields.io/github/last-commit/gaozhihong73/DynaGP?style=flat-plastic&color=fb8c00" alt="Last Commit">
-    </a>
-    <img src="https://img.shields.io/github/languages/top/gaozhihong73/DynaGP?style=flat-plastic&color=f1e05a" alt="Languages">
-    <a href="https://github.com/gaozhihong73/DynaGP/stargazers">
-        <img src="https://img.shields.io/github/stars/gaozhihong73/DynaGP?style=flat-plastic&color=dfb317" alt="Stars">
-    </a>
-</p>
-
 # DynaGS
 
-**基于 Wide-Deep Transformer 的动态基因组选择框架**
+基于 Wide-Deep Transformer 的动态基因组选择框架。当前项目使用 **TFPP**，根据 SNP 基因型预测一个或多个表型在多个时间点上的动态轨迹。
 
-DynaGS 提出了一种融合 Legendre 多项式宽通路 (Wide) 与 Transformer 深通路 (Deep) 的基因组选择模型 (TFPP)，通过门控网络自适应融合两条通路的输出，用于预测多时间点、多表型动态生长轨迹；真实效果须由固定划分的独立实验评估。
+## TFPP 简介
 
-<!-- TODO: 插入模型架构图 -->
-<!-- ![Architecture](docs/architecture.png) -->
+TFPP 结合两个互补通路：
 
-## 核心亮点
+- **Wide 通路**：以 SNP 剂量和 Legendre 时间多项式建模全局、可解释的加性时间趋势。
+- **Deep 通路**：将 SNP 编码为 token，使用 Transformer 学习位点间的非线性交互。
+- **门控融合**：自适应融合两条通路的输出，得到各表型、各时间点的预测值。
 
-- **Wide-Deep 双通路架构**: 宽通路使用 Legendre 多项式基函数捕捉全局生长趋势，深通路使用 Transformer 编码器建模 SNP 间的非线性交互效应，门控网络动态融合两者。
-- **监督式位点筛选**: GWAS 与 DC-SIS 只使用训练个体标签，返回原始 SNP 列索引；runner 的 `GWAS->DC-SIS` 始终显式串联。
-- **连续表征**: ConvAE 是带可选表型辅助头的 masked autoencoder，导出连续潜在特征供固定 Ridge 探针使用；它不是 SNP 位点筛选，连续 TFPP 第9步仍未实现。
-- **多表型联合预测**: 单次训练同时预测多个表型 (如 RGBVI、GreenCoverage 等) 在全部时间点上的动态曲线。
-- **灵活的消融实验**: 通过 `--ablation_mode` 一键切换完整模型 / 仅 Wide / 仅 Deep / 无门控相加，便于对比分析。
-- **训练产物复用**: 推理严格加载保存的模型配置、划分、筛选索引和 scaler，不重新筛选或拟合。
+模型支持多表型联合预测、训练集内 SNP 筛选、早停和 K 折交叉验证。`--ablation_mode` 可切换至仅 Wide、仅 Deep 或无门控的直接相加模式。
 
-## 项目目录结构
-
-```
-DynaGS/
-├── train.py                  # 训练入口
-├── infer.py                  # 推理入口
-├── config/                   # Pydantic 配置定义
-│   ├── TFPP_Config.py        #   主模型配置
-│   ├── Sim_TFPP_Config.py    #   模拟数据配置
-│   └── ConvAE_Config.py      #   ConvAE 配置
-├── model/                    # 模型定义
-│   ├── TFPP.py               #   Wide-Deep Transformer 主模型
-│   └── ConvAE.py             #   带表型辅助任务的 masked autoencoder
-├── trainer/                  # 训练器
-│   ├── TFPP_Trainer.py       #   主模型训练器
-│   ├── Sim_TFPP_Trainer.py   #   模拟数据训练器
-│   ├── ConvAE_Trainer.py     #   ConvAE 训练器
-│   └── _scheduler.py         #   学习率调度器工具
-├── dataloader/               # 数据加载与预处理
-│   ├── TFPP_DataLoader.py    #   真实数据加载器
-│   ├── Sim_DataLoader.py     #   模拟数据加载器
-│   └── ConvAE_DataLoader.py  #   ConvAE 数据加载器
-├── utils/                    # 工具模块
-│   ├── Screening.py          #   SNP 特征筛选 (GWAS + DC-SIS)
-│   ├── Normalization.py      #   归一化 (zscore/minmax/robust)
-│   ├── Loss.py               #   损失函数 (MSE, MSE+PCC, MSE+Offset)
-│   ├── Calculate_Metrics.py  #   评估指标 (MSE, PCC, r²)
-│   ├── model_loader.py       #   通用模型加载器 (自动推测参数)
-│   └── Logger.py             #   日志工具
-├── dataset/                  # 数据目录
-├── outputs/                  # 训练输出目录
-└── pyproject.toml            # 依赖管理 (uv)
-```
-
-## 环境准备与安装
-
-### 系统要求
-
-| 项目 | 要求 |
-|:----:|:----:|
-| 操作系统 | Linux (推荐 Ubuntu 20.04+) |
-| Python | 3.10 |
-| CUDA | 12.4 |
-| GPU 显存 | >= 8 GB |
-| 包管理器 | [uv](https://docs.astral.sh/uv/) |
-
-### 安装步骤
-
-```bash
-# 克隆仓库
-git clone https://github.com/gaozhihong73/DynaGP.git
-cd DynaGS
-
-# 安装 uv (如尚未安装)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 创建虚拟环境并安装全部依赖
-uv sync
-```
-
-### 核心依赖
-
-```bash
-python >= 3.10, < 3.11
-torch == 2.5.1
-numpy == 1.23.5
-scipy == 1.10.1
-pandas == 2.0.3
-scikit-learn == 1.3.2
-xgboost == 3.0.5
-pydantic >= 2.13
-matplotlib == 3.8.2
-seaborn == 0.13.2
-```
-
-## 数据集准备
-
-### 完整模拟数据准备（第一阶段）
-
-R 模拟在独立环境中运行，环境只包含当前脚本所需依赖：
-
-```bash
-conda env create -f environment/dynags-r.yml
-conda run -n dynags-r Rscript r/generate_simulation.R \
-  --output_dir /root/DynaGS/dataset/sim_data/staging/scenario_smoke/rep_01 \
-  --scenario smoke --rep 1 --n_samples 100 --n_snps 200 \
-  --n_qtl 20 --n_timepoints 20 --heritability 0.5 --ld 0.3 --seed 73
-```
-
-R 每次只输出一份完整的基因型、表型、SampleID 和独立真值文件，不划分
-Train/Val/Test。随后由 Python 调用公共 `utils.Split` 生成或读取个体划分：
-
-```bash
-uv run python prepare_simulation.py \
-  --input_dir /root/DynaGS/dataset/sim_data/staging/scenario_smoke/rep_01 \
-  --output_dir /root/DynaGS/dataset/sim_data/tfpp_ready/scenario_smoke/rep_01 \
-  --seed 73 --train_ratio 0.8 --val_ratio 0.1 --test_ratio 0.1
-
-uv run python validate_simulation.py \
-  --data_dir /root/DynaGS/dataset/sim_data/tfpp_ready/scenario_smoke/rep_01
-```
-
-需要继续检查实际筛选、训练、checkpoint 和推理时，按
-[`docs/SIMULATION_DEBUG_WORKFLOW.md`](docs/SIMULATION_DEBUG_WORKFLOW.md) 的小规模端到端流程执行。
-
-准备结果中的 `genotype.npy` 保持 `0/1/2` 剂量；模型类别转换仍由
-`TFPPDataset` 完成。`truth/` 下的 TrueGV 与真实效应只用于事后评估，不在
-Dataset 或 DataLoader 输入列表中。所有入口默认拒绝覆盖已有目录。旧
-`SimTFPPDataset`、`SimTFPPTrainer` 和 `SimTFPPConfig` 仅保留弃用别名；新模拟
-实验直接使用主 TFPP 管线。
-
-### 动态非线性遗传场景：传统模型、RF 与 XGBoost
-
-该比较必须称为“动态非线性遗传场景”，其结论只适用于这一个预注册场景，
-不能声称代表所有遗传结构。场景固定为 N=5000、P=20000、T=30、h²=0.8、
-200 个 QTL、100 组动态上位互作，并统一使用 seed 73 生成的同一份
-4000/500/500 个体划分。
-
-生成完整模拟数据：
-
-```bash
-conda run -n dynags-r Rscript r/generate_simulation.R \
-  --output_dir /root/DynaGS/dataset/sim_data/staging/scenario_tfpp_dynamic/rep_01 \
-  --scenario tfpp_dynamic \
-  --rep 1 \
-  --n_samples 5000 \
-  --n_snps 20000 \
-  --n_qtl 200 \
-  --n_timepoints 30 \
-  --heritability 0.8 \
-  --ld 0.3 \
-  --dominance_ratio 0.7 \
-  --prop_add 0.1 \
-  --prop_dom 0.2 \
-  --prop_mixed 0.7 \
-  --n_epistasis 100 \
-  --epistasis_strength 1.5 \
-  --seed 73
-```
-
-只生成一次固定划分：
-
-```bash
-uv run python prepare_simulation.py \
-  --input_dir /root/DynaGS/dataset/sim_data/staging/scenario_tfpp_dynamic/rep_01 \
-  --output_dir /root/DynaGS/dataset/sim_data/tfpp_ready/scenario_tfpp_dynamic/rep_01 \
-  --seed 73 \
-  --train_ratio 0.8 \
-  --val_ratio 0.1 \
-  --test_ratio 0.1
-```
-
-安装新增的 XGBoost 依赖后运行比较：
-
-```bash
-uv sync
-uv run python train_baseline.py
-```
-
-本阶段只比较 Train-Mean、Ridge-All、Ridge-A+D、GBLUP-All、RF 和 XGBoost，
-不运行 TFPP。除不读取 SNP 的 Train-Mean 外，所有模型直接使用完整原始 SNP；
-不读取筛选索引。Ridge-A+D 的显性编码由每个原始 SNP 派生，RF/XGBoost 的内部
-列采样属于模型训练，不是预先筛选数据。训练预处理只在 train 上拟合，Ridge/GBLUP
-用 val 选正则参数，XGBoost 用 val 早停，test 只评估一次。
-
-正式结果为
-`outputs/baseline_comparison/scenario_tfpp_dynamic/rep_01/comparison_summary.csv`，
-且只含 `model | PCC ↑ | R² ↑ | RMSE ↓ | MAE ↓ | True-GV PCC ↑ | Runtime (s) ↓`。
-各模型目录中的预测和 `protocol.json` 用于核验所有模型使用了相同 split；True-GV
-只在模型和参数冻结后计算诊断 PCC，不进入拟合或选参。
-
-### 数据目录结构
-
-```bash
-dataset/maize/
-├── snp/
-│   └── snp_50000.npy         # SNP 基因型矩阵 [样本数, SNP数], 编码 0/1/2
-├── cleaned_pheno/            # 清洗后的表型数据
-│   ├── RGBVI.csv             #   每个 CSV 对应一个表型
-│   ├── GreenCoverage.csv     #   列名 = 时间点 (天), 行 = 样本
-│   ├── CIVE.csv
-│   └── ...                   #   共 20+ 个植被指数表型
-└── pheno/                    # 原始表型数据 (未清洗)
-```
-
-### 数据格式说明
-
-**SNP 数据** (`.npy`):
-
-- 形状: `[n_samples, n_snps]`
-- 编码: 加性编码 0/1/2 (对应 AA/Aa/aa)
-- 示例: `snp_50000.npy` 包含 50000 个经过质控的 SNP 位点
-
-**表型数据** (`.csv`):
-- 文件名即表型名 (如 `RGBVI.csv`)
-- 列名为采样时间点 (天)，如 `10, 12, 14, 15, 17, 19, 24, 26, 37, 44, 51, 65, 80, 101`
-- 每行为一个样本在各时间点的表型观测值
-
-## 训练 (`train.py`)
-
-### 基因型编码与筛选缺失边界
-
-筛选与模型输入采用不同表示，转换集中在 `utils/Genotype.py`，调用方不得凭数值猜测表示：
-
-| 含义 | 原始/筛选剂量 | 模型类别码 |
-|------|---------------|------------|
-| 观测基因型 | `0 / 1 / 2` | `1 / 2 / 3` |
-| 原始缺失 | `-1` 或 `NaN`（不能直接进入筛选） | `0` |
-| ConvAE 边界填充 | 不参与筛选 | `0`，由独立 padding mask 区分真实缺失 |
-
-`dosage_to_model_codes()` 显式编码；`model_codes_to_dosage()` 将类别0恢复为缺失标记 `-1`。
-`validate_dosage()` 与 `prepare_screening_dosage()` 保证 GWAS/DC-SIS 只接收完整的离散剂量。
-三个筛选入口在计算或读取缓存前均校验输入，拒绝类别3、缺失、小数和无穷值。
-若数组恰好只含1/2，数值本身不能区分两种表示，因此必须遵循调用方的显式转换契约。
-模型通过 `model_code_tensor()` 校验后转换整数索引，禁止用截断连续表征来冒充类别码。
-
-仓库原先只记录了模型缺失类别，没有训练集拟合的筛选填补规则。新增
-`--screen_missing_strategy error|mode`：默认 `error` 明确拒绝缺失；`mode` 使用
-`TrainingDosageImputer.fit(dosage, train_idx=...)` 在指定训练个体上拟合逐位点众数，
-并列选择较小的观测剂量，训练中整列缺失则报错。`metadata_` 记录训练行号、缺失计数、
-填充值和编码版本，可随实验保存为 JSON。缺失可以经显式众数策略填为0，但不会自动当作观测剂量0。
-普通 TFPP、每个 K 折实验和准备后的模拟数据均在固定划分后接入 mode，仅用当前 train 个体拟合。
-
-真实与模拟管线都在筛选前显式解码模型类别，使用相同剂量筛选，并在进入模型时统一转为
-四类别码。旧三类别模拟 checkpoint 仍依赖旧编码，不能与新编码管线混用。普通、折内与
-模拟 TFPP 均在固定划分后筛选。
-
-`screen_multivariate` 的单一默认来源为 `TFPPConfig`，当前为 `true`；训练可显式传
-`--screen_multivariate false`。有效值与缺失策略写入日志及 `model_config.json`。
-推理仅使用训练记录，保留的同名 CLI 参数不重新计算或覆盖筛选。
-缓存键新增编码版本 `dosage012_missing-1_categorical0123_v1`、筛选算法版本
-`gwas_pca_rint_minp_dcsis_v3` 和缺失策略。普通训练还加入稳定训练索引哈希、训练 SNP/表型内容指纹、
-表型列表、筛选参数及 split 标识；不读取全数据文件 mtime，所以修改验证/测试行不改变缓存键。
-旧缓存保留，但普通训练不会命中原先全量筛选缓存。
-
-### 普通 TFPP 的训练个体隔离与双输入视图
-
-普通模式的顺序是：加载类别 SNP/原始表型 → 固定 split → 仅训练行转换剂量并筛选 →
-用原始列索引切片三组类别 SNP → 仅训练表型拟合 scaler → 按筛选后维度创建模型。
-多表型联合筛选能力与 `screen_multivariate` 显式配置保持可用。
-
-Deep 只接收类别 `0/1/2/3`，保留缺失类别0。Wide 独立恢复剂量，再除以2得到 `0/0.5/1`；
-`--wide_missing_strategy mode`（默认）只用训练个体的逐位点众数填补 Wide 缺失，并将填充值
-保存为 checkpoint buffer；`error` 拒绝 Wide 缺失。不将筛选的填补结果写回 Deep 输入。
-线性注意力、时间预测头和门控未改变；普通/折内模型统一使用 `dosage_v1`，模拟模型暂保留旧兼容路径。
-
-每次普通训练在实验目录保存：
-
-- `preprocessing/split.npz`：实际划分副本；JSON 同时记录源路径及文件 SHA-256。
-- `preprocessing/screened_indices.npy`：相对于原始 SNP 矩阵的列索引，关闭筛选时为全部列。
-- `preprocessing/preprocessing.json`：维度、筛选配置、训练行/数据指纹、缓存键、编码版本及填补元数据。
-- `scalers/scaler.pkl`：只由训练表型拟合的 scaler。
-
-`load_tfpp_model()` 和 `load_model_from_checkpoint()` 默认严格校验训练产物，并恢复 Wide
-填补 buffer。测试集推理复用保存的 test_idx 和原始列索引，不再通过 seed 重建或读取表型筛选。
-K折每折独立保存相同 schema 3 产物，可直接把 fold 目录传给新推理；旧 K 折产物仅允许显式 legacy 兼容。
-
-### 共享个体划分
-
-可用同一份 `.npz` 文件固定不同模型、不同表型实验的个体划分：
-
-```bash
-uv run python train.py --split_file splits/maize_seed73.npz --seed 73
-```
-
-文件不存在时，按当前比例和 seed 生成并保存；文件存在时，以文件中的索引为准，保留其划分 seed 和比例元数据，
-不会重新划分或覆盖。`--split_file auto` 根据样本数、seed、比例和个体顺序哈希在 `splits/` 下命名。
-单份划分不能与 `--use_kfold true` 同时使用；普通 TFPP 未指定 `split_file` 时也自动保存并复用划分，
-索引生成规则与原先相同 seed/比例的 `random_split` 一致。
-
-当前真实数据加载器没有显式个体 ID，因此文件明确记录 `sample_id_source=row_index`，
-使用原始数据行号作为 sample_id。复用时须保持 SNP 与表型行顺序一致；仅凭行号无法识别
-同样行数的数据被重新排序或替换。若上游有真实 ID，可通过公共 API 提供并校验顺序：
-
-```python
-from utils.Split import generate_split, save_split, load_split
-
-split = generate_split(sample_ids=["maize-A", "maize-B", "maize-C"],
-                       ratios=(1 / 3, 1 / 3, 1 / 3), seed=73)
-save_split(split, "splits/example.npz")
-split = load_split("splits/example.npz", sample_ids=["maize-A", "maize-B", "maize-C"])
-```
-
-ConvAE 通过 `ConvAEConfig(split_file="splits/maize_seed73.npz")` 复用文件，
-只将其中 train/val 个体传给训练/验证 loader，test 个体保持留出。
-两个 loader 也支持 `indices=split`，K 折 loader 继续接收三组显式索引并校验覆盖和互斥。
-每行个体的全部时间点始终一起取出。普通/折内 TFPP 筛选和 ConvAE 表型归一化均只拟合 train 个体。
-
-快速 CPU 测试（使用合成数据与临时目录，不需要玉米数据或 GPU）：
-
-```bash
-.venv/bin/python -B -m unittest discover -s tests -v
-```
-
-### ConvAE 的共享划分与表型归一化
-
-ConvAE 沿用现有名称，实际为带表型辅助任务的 masked autoencoder；本步骤不增加卷积层或 TFPP 连续输入头。
-`ConvAEDataset` 只加载原始表型、类别 SNP、稳定行索引 sample_id 和分块信息，不计算全体均值/标准差。
-数据流为：原始数据 → 已确定的 IndividualSplit → train 表型拟合逐表型全局 StandardScaler →
-仅 transform train/val/test → 独立归一化视图。原始 Dataset 不被归一化结果覆盖，test 不进入训练或早停。
-表型含 NaN/Inf 时采用 `phenotype_missing_strategy=error`，不从 test 或全体样本估算填充值。
-
-```bash
-# 只准备数据，不初始化模型或运行训练；使用 TFPP 保存的普通 split
-.venv/bin/python -B train_convae.py --prepare_only --exp_name maize_mae \
-  --split_file outputs/tfpp/EXP/preprocessing/split.npz \
-  --snp_file dataset/maize/snp/snp_50000.npy --device cpu --num_workers 0
-
-# 与 TFPP K 折比较时，原样使用指定 fold 的三组索引
-.venv/bin/python -B train_convae.py --prepare_only --exp_name maize_mae_cv \
-  --split_file outputs/tfpp/EXP/folds/fold_01/preprocessing/split.npz \
-  --snp_file dataset/maize/snp/snp_50000.npy --device cpu --num_workers 0
-```
-
-API 可直接传内存划分：`ConvAETrainer(config, indices=split, initialize_model=False)`；
-此时不要同时设置 `config.split_file`。`get_mae_dataloaders(dataset, split, ...)` 返回
-train/val/test loader、scalers 和 split 的 `MAEDataLoaders`；旧 `get_mae_dataloader()` 仍返回 train/val 两项，
-但改为只用 train 拟合。公共数据接口默认保留 `(chunks, normalized_phenotype)`；trainer 内部
-启用 include_sample_ids=True，使用三项 `(chunks, normalized_phenotype, sample_id)` 固定验证掩码。
-直接访问原始 Dataset 则返回 `(chunks, raw_phenotype)`；旧 `phenotype_norm` 不再存在，
-调用 Dataset 的旧归一化方法会明确报错，应改用固定 split 后的 loader。
-
-`padding_mask` 为长度 target_length 的 bool 向量，True 只表示结构性 padding；
-`chunk_padding_mask` 为 `[num_chunks, chunk_size]`，`chunk_valid_mask` 为其反值。
-`original_length` 记录原始 SNP 有效长度，`chunk_starts`、`chunk_valid_lengths` 可恢复每块的原始位置。
-`sample_with_metadata(i)` 提供真实缺失 mask、padding mask 和 sample_id：真实缺失类别0仍是有效位置，
-不能把 `SNP == 0` 当作 padding。模型现已把这些 mask 用于特征投影、注意力、池化和重建目标。
-
-数据产物保存于 `outputs/convae/<exp_name>/<split或fold标识>_<索引内容哈希>/`：
+## 项目结构
 
 ```text
-config.json
-preprocessing/preprocessing.json   # schema 3，编码/缺失策略、个体身份、时间列、chunk 契约与哈希
-preprocessing/split.npz            # 实际使用的完整 manifest 副本，保留 TFPP fold 信息
-preprocessing/padding_mask.npy
-preprocessing/chunk_padding_mask.npy
-scalers/scaler.pkl                 # 与 TFPP 同格式，支持 transform 和反归一化
+DynaGS/
+├── train.py                  # TFPP 训练入口
+├── infer.py                  # TFPP 推理入口
+├── config/TFPP_Config.py     # 配置定义
+├── dataloader/TFPP_DataLoader.py
+├── model/TFPP.py             # Wide-Deep Transformer
+├── trainer/TFPP_Trainer.py   # 训练、验证与测试
+├── utils/                    # 划分、筛选、归一化、指标等工具
+├── dataset/                  # 本地数据目录
+└── outputs/                  # 训练输出目录
 ```
 
-`load_convae_preprocessing(path, dataset=..., config=...)` 校验 split/fold、sample_id 顺序、
-表型和时间点、编码版本、原始有效长度、chunk 参数及文件 SHA-256；缺失/篡改时失败，不重新 fit。
-当前 sample_id 是稳定行索引，不是生物学 ID。默认未显式提供时间坐标时保留 CSV 列名和顺序，不假定真实天数；
-可用 `--time_coordinates` 声明逐列坐标。
+## 安装
 
-兼容性变化：ConvAEConfig 默认比例现与 TFPP 一致为 0.8/0.1/0.1；None/auto 使用共享 splits/ 命名规则，
-显式 split_file 必须已存在，不再为缺失的 fold 文件静默生成随机划分。旧80/20实验仍可显式设置
-train_ratio=0.8、val_ratio=0.2、test_ratio=0，test 保持为空。
-输出不再直接写入共享的 outputs/convae 根目录；同目录下不同数据契约/配置会拒绝覆盖，应使用新 exp_name。
-旧本地 ConvAE_Train.py 被仓库忽略；可版本控制的命令入口为 train_convae.py。
-自动潜在特征导出仍暂停；ConvAE v2 已支持动态表型维度和真正的辅助任务开关，见下节。
-
-### ConvAE v2 模型、目标和 checkpoint
-
-模型显式接收 `n_phenotypes`、`n_time_points`，表型输出为 `[batch, n_phenotypes, n_time_points]`。
-trainer 根据 phenotype_names 和 CSV 时间列确定维度，并与显式 n_time_points/time_coordinates 校验，
-不再固定输出14；不提供时间坐标时仅使用 CSV 列顺序。单表型14时间点继续受支持。
-`use_pheno_help=false` 不构建/调用表型头，对应参数不进入优化器，表型损失严格为零。
-
-模型选择口径在配置中固定，不允许根据运行结果切换：
-
-- 开启辅助：`val_total_loss = recon_weight * val_recon_loss + pheno_weight * val_pheno_loss`。
-- 关闭辅助：使用 `val_recon_loss`；API 配置必须显式设置 recon_weight=1、pheno_weight=0。
-  CLI 仅在未显式给权重时按开关选择默认值。权重非负、有限且和为1。
-- train/val 共用同一损失函数；重建 CE 除以可用 SNP 目标数，表型 MSE 除以个体×表型×时间点数。
-  epoch 指标按监督元素总数汇总，不能简单平均各 batch 均值。
-- 验证也执行掩码重建，mask 由 seed、完整 split 指纹和 sample_id 独立生成并保存；
-  不随 epoch、batch 顺序或 batch_size 改变。test 个体不能进入验证选择入口。
-
-padding 的 embedding 贡献先清零，完整 padding patch 不作为注意力 key/value，也不参与 mask 抽样或池化；
-全 padding chunk 跳过注意力。最后的部分 patch 自动补内部 padding，保留其有效 SNP。
-池化按可见的有效 SNP 数加权，真实缺失类别0保留可学习 embedding；类别0不提供重建监督。
-重建只监督“选中 patch ∩ 非结构性 padding ∩ 观测类别1/2/3”的 SNP。
-若某行仅有一个有效 patch 且全部被遮挡，解码使用非 SNP 的零上下文，不把 padding 当上下文。
-无可用重建目标时损失与梯度为零；纯重建 batch 没有有效目标时跳过优化器更新，避免 weight decay 改动权重。
-验证也记录可用目标数和无目标 batch 数；无目标时的零值不代表有可用的重建评分信息。
+项目使用 Python 3.10 与 `uv` 管理依赖：
 
 ```bash
-# 仅重建，不使用表型辅助；显式启用新的固定验证重建口径
-.venv/bin/python -B train_convae.py --exp_name maize_mae_recon \
-  --split_file outputs/tfpp/EXP/preprocessing/split.npz \
-  --use_pheno_help false --recon_weight 1 --pheno_weight 0
+git clone https://github.com/gaozhihong73/DynaGP.git
+cd DynaGS
+uv sync
 ```
 
-`ConvAE.forward()` 仍返回四项：chunk 表征、三维表型预测（关闭时为 None）、重建 logits、bool patch mask。
-新增 padding_mask、reconstruction_mask、generator 关键字参数；eval 传固定 mask 时也执行解码，
-纯表征推理应显式使用 mask_ratio=0。省略 padding_mask 明确表示所有输入位置有效，不能从类别0推测 padding。
-patch_size、d_model、d_ext、层数、dropout 和 train_mask_ratio/val_mask_ratio 均在配置与 CLI 中记录。
+查看训练参数：
 
-新增产物包括 `preprocessing/validation_masks.npz`、`models/model_config.json`、
-`models/checkpoint_metadata.json`；history 同时记录 train/val total、recon、pheno、选择指标及目标数。
-`best_model.pt` 采用 format_version=2 的结构化包，包含 state_dict、模型配置、最佳验证分项、
-选择定义，以及预处理/固定 mask 的哈希。训练结束恢复最佳权重，不使用最后一轮权重代替。
-
-```python
-from utils.convae_model_loader import load_convae_model
-model, info = load_convae_model("outputs/convae/EXP/SPLIT_TAG", device="cpu")
+```bash
+uv run python train.py --help
 ```
 
-加载器使用 weights_only=True，校验 schema 3 数据契约、辅助开关、维度、选择口径、mask 和权重形状。
-旧裸 state_dict、固定14维旧实验不会静默迁移：旧归一化/未屏蔽 padding 的语义不能等价恢复，
-请保留旧代码用于诊断或在新 exp_name 下从头训练。第5步数据产物可独立读取，但新模型实验应使用新目录。
-此步不增加 TFPP 连续输入头，也不导出最终潜在特征。
+## 数据准备
+
+默认数据目录：
+
+```text
+dataset/maize/
+├── snp/snp_50000.npy
+└── cleaned_pheno/
+    ├── RGBVI.csv
+    └── GreenCoverage.csv
+```
+
+- SNP 数据是形状为 `[样本数, SNP 数]` 的 `.npy` 矩阵；观测基因型采用 `0/1/2` 剂量编码，缺失值可为 `-1` 或 `NaN`。
+- 每个表型对应一个 CSV，文件名即表型名称。CSV 的行顺序必须与 SNP 矩阵一致，列对应时间点。
+- `--pheno_names` 指定读取的表型；`--time_coordinates` 的数量和顺序必须与 CSV 时间列一致。
+- 如有稳定样本 ID，可用 `--sample_ids_file` 提供仅含 `SampleID` 列的 CSV，以校验复用的划分文件。
+
+## 训练（`train.py`）
+
+### 训练流程
+
+1. **加载数据**：读取 SNP 矩阵及指定表型 CSV，校验样本数和时间点。
+2. **划分个体**：普通模式按 `train/val/test` 比例划分；可用 `--split_file` 固定或复用。K 折模式为每一折分别确定训练、验证和测试个体。
+3. **训练集内预处理**：仅使用训练个体拟合 SNP 缺失填补、GWAS/DC-SIS 筛选及表型归一化器；验证和测试数据只应用已拟合的结果。
+4. **构建模型**：按筛选后的 SNP 数初始化 TFPP，Wide 通路建模时间趋势，Deep 通路学习 SNP 交互，再经门控融合。
+5. **训练与选择**：采用 AdamW、Warmup + Cosine 学习率调度和梯度裁剪；按验证损失保存最佳权重，并使用 `patience` 早停。
+6. **测试与保存**：恢复最佳验证权重后对测试集评估一次，保存模型、划分、筛选索引、归一化器、日志和训练历史。
 
 ### 快速开始
 
-```bash
-# 使用默认参数训练 (自动按时间戳命名实验)
-python train.py
+使用默认数据路径和配置：
 
-# 自定义训练
-python train.py \
-  --exp_name maize_rgbvi \
-  --pheno_names RGBVI \
+```bash
+uv run python train.py --exp_name maize_rgbvi
+```
+
+指定多个表型、时间点和训练参数：
+
+```bash
+uv run python train.py \
+  --exp_name maize_multitrait \
+  --pheno_names RGBVI GreenCoverage \
+  --time_coordinates 10 12 14 15 17 19 24 26 37 44 51 65 80 101 \
   --epochs 200 \
-  --degree 5 \
-  --screen_k 10000 \
+  --batch_size 32 \
+  --num_workers 0
+```
+
+小规模冒烟训练（不进行 SNP 筛选）：
+
+```bash
+uv run python train.py \
+  --exp_name smoke \
+  --epochs 1 \
+  --num_workers 0 \
+  --screen_k 0 \
+  --gwas_k 0
+```
+
+### 划分与可复现性
+
+默认随机种子为 `73`。普通训练可保存并复用同一份划分，以保证不同实验使用相同个体：
+
+```bash
+uv run python train.py \
+  --exp_name maize_seed73 \
+  --split_file splits/maize_seed73.npz \
+  --seed 73
+```
+
+指定的 `split_file` 不存在时会自动创建，存在时则直接复用。`--split_file` 不能与 `--use_kfold true` 同时使用。
+
+K 折交叉验证示例：
+
+```bash
+uv run python train.py \
+  --exp_name maize_cv \
+  --use_kfold true \
+  --n_folds 5 \
+  --kfold_val_ratio 0.1 \
+  --num_workers 0
+```
+
+### SNP 筛选与缺失值
+
+`--gwas_k` 指定 GWAS 保留位点数，`--screen_k` 指定 DC-SIS 保留位点数；设为 `0` 即跳过对应步骤。筛选仅使用训练个体及其标签，不读取验证集或测试集标签。
+
+```bash
+uv run python train.py \
+  --exp_name maize_screened \
   --gwas_k 10000 \
-  --loss_type mse_pcc \
-  --use_kfold false
+  --screen_k 10000 \
+  --screen_multivariate true \
+  --screen_missing_strategy mode \
+  --wide_missing_strategy mode
 ```
 
-### 输出目录结构
+`screen_missing_strategy=mode` 只依据训练个体，按位点以众数填补筛选阶段的缺失值；Deep 通路仍保留自身缺失类别。使用 `error` 时，检测到缺失值会直接报错。
 
-训练完成后，输出保存在 `outputs/tfpp/{exp_name}/`:
+### 常用参数
 
-```
-outputs/tfpp/{exp_name}/
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--exp_name` | 自动时间戳 | 实验名称，输出至 `outputs/tfpp/<exp_name>` |
+| `--snp_file` | `dataset/maize/snp/snp_50000.npy` | SNP `.npy` 文件 |
+| `--pheno_dir` | `dataset/maize/cleaned_pheno` | 表型 CSV 目录 |
+| `--pheno_names` | `RGBVI` | 待预测表型，可传多个名称 |
+| `--epochs` / `--batch_size` | `200` / `32` | 最大训练轮数和批大小 |
+| `--lr` / `--weight_decay` | `1e-4` / `1e-4` | AdamW 学习率和权重衰减 |
+| `--patience` | `20` | 验证损失无改善时的早停轮数 |
+| `--norm_method` | `residual_global` | `global`、`timepoint` 或 `residual_global` |
+| `--scaler_type` | `zscore` | `zscore`、`minmax` 或 `robust` |
+| `--gwas_k` / `--screen_k` | `10000` / `10000` | GWAS 与 DC-SIS 保留数，`0` 为关闭 |
+| `--degree` | `5` | Wide 通路 Legendre 多项式阶数 |
+| `--ablation_mode` | `all` | `all`、`wide`、`deep` 或 `add` |
+| `--use_kfold` / `--n_folds` | `false` / `10` | 是否使用 K 折及折数 |
+
+布尔参数需显式使用 `true` 或 `false`，例如 `--use_kfold false`。
+
+### 训练产物
+
+普通训练的主要产物位于 `outputs/tfpp/<exp_name>/`：
+
+```text
+outputs/tfpp/<exp_name>/
 ├── models/
-│   ├── best_model.pt         # 最优模型权重
-│   └── model_config.json     # 模型结构配置 (供推理自动加载)
-├── scalers/
-│   └── scaler.pkl            # 归一化器 (推理时反归一化用)
+│   ├── best_model.pt
+│   ├── model_config.json
+│   └── checkpoint_integrity.json
+├── preprocessing/
+│   ├── split.npz
+│   ├── screened_indices.npy
+│   └── preprocessing.json
+├── scalers/scaler.pkl
 ├── training_history/
-│   ├── train_history.json    # 训练/验证损失曲线
-│   └── training_summary.json # 训练摘要 (最优轮次、指标等)
-└── logs/
-    └── {exp_name}.log        # 完整训练日志
+│   ├── training_history_metrics.csv
+│   └── training_summary.json
+├── test_evaluation.json
+└── <exp_name>.log
 ```
 
-### 全部参数说明
+请保留整个实验目录。推理会读取其中的模型配置、筛选索引和归一化器，不应重新筛选 SNP 或拟合 scaler。
 
-#### 实验标识与数据路径
+## 推理（`infer.py`）
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--exp_name` | 实验名称，不指定则自动按时间戳生成 | `exp_YYYYMMDD_HHMMSS` |
-| `--snp_file` | SNP 基因型数据路径 (.npy, 编码 0/1/2) | `dataset/maize/snp/snp_50000.npy` |
-| `--pheno_dir` | 表型数据目录 (每个 CSV 对应一个表型) | `dataset/maize/cleaned_pheno` |
-
-#### 数据集划分与预处理
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--train_ratio` | 训练集比例 | 0.8 |
-| `--val_ratio` | 验证集比例 (早停与模型选择) | 0.1 |
-| `--test_ratio` | 测试集比例 (最终评估) | 0.1 |
-| `--pheno_names` | 预测的表型名称列表 (需与 CSV 文件名对应) | `RGBVI` |
-| `--time_coordinates` | 采样时间点坐标 (天) | `10 12 14 15 17 19 24 26 37 44 51 65 80 101` |
-| `--norm_method` | 归一化策略: `global` / `timepoint` / `residual_global` | `residual_global` |
-| `--scaler_type` | 缩放器类型: `zscore` / `minmax` / `robust` | `zscore` |
-
-#### 训练超参数
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--epochs` | 训练总轮数上限 (配合早停) | 200 |
-| `--batch_size` | 批次大小 (必须为 2 的倍数) | 32 |
-| `--lr` | Deep 通路学习率 (Wide 通路自动 ×0.1) | 0.0001 |
-| `--min_lr` | 学习率下限 (Cosine 衰减终点) | 1e-7 |
-| `--weight_decay` | 权重衰减 (AdamW L2 正则) | 0.0001 |
-| `--dropout` | Dropout 比例 | 0.25 |
-| `--grad_clip_norm` | 梯度裁剪范数 (0=不裁剪) | 1.0 |
-| `--patience` | 早停耐心值 | 20 |
-| `--seed` | 随机种子 (训练与推理必须一致) | 73 |
-| `--is_save` | 是否保存模型与训练历史 | true |
-| `--num_workers` | DataLoader 工作线程数 | 8 |
-
-#### SNP 特征筛选
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--screen_k` | DC-SIS 精筛保留 SNP 数 (0=跳过) | 10000 |
-| `--gwas_k` | GWAS 粗筛保留 SNP 数 (0=跳过) | 10000 |
-
-> **筛选策略** (取决于 SNP 总数 P):
-> - **P > 50000 (串联模式)**: GWAS (F 检验) 先在全维度粗筛 `gwas_k` 个，DC-SIS 再在 GWAS 候选子集上精筛至 `screen_k` 个，最终结果取 DC-SIS 精选。
-> - **P <= 50000 (并行模式)**: GWAS 和 DC-SIS 各自独立在全维度筛选，最终取两者并集 (互补覆盖)。
->
-> 默认 `screen_multivariate=true` 为多表型联合筛选，显式 false 才逐性状筛选取并集；缓存绑定训练行及其 genotype/phenotype 内容、参数和编码/算法版本，不依赖 test 标签。
-
-#### 损失函数与正则化
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--loss_type` | 损失类型: `mse` / `mse_pcc` / `mse_offset` | `mse` |
-| `--pcc_weight` | PCC 损失权重 (mse_pcc/mse_offset 生效) | 0.2 |
-| `--offset_weight` | 个体偏移损失权重 (mse_offset 生效) | 0.5 |
-| `--l1_wide_weight` | Wide 通路 L1 稀疏正则系数 (0=关闭) | 1e-5 |
-
-#### 学习率调度 (Warmup + Cosine)
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--use_warmup` | 是否启用学习率预热 | true |
-| `--warmup_epochs` | 预热轮数 | 5 |
-| `--warmup_start_factor` | 起始系数 (初始 lr = base_lr × 此值) | 0.1 |
-| `--warmup_end_factor` | 结束系数 (预热结束 lr = base_lr × 此值) | 1.0 |
-
-#### 模型结构
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--d_model` | Transformer 隐藏维度 (需能被 num_heads 整除) | 32 |
-| `--num_heads` | 多头注意力头数 | 4 |
-| `--num_layers` | 编码器堆叠层数 | 1 |
-| `--d_ff` | FFN 隐藏层维度 | 128 |
-| `--num_embeddings` | SNP 嵌入类别数 (-1/0/1/2) | 4 |
-| `--degree` | Legendre 多项式阶数 (0=纯加性模型) | 5 |
-| `--ablation_mode` | 消融模式: `all` / `wide` / `deep` / `add` | `all` |
-
-#### K 折交叉验证
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--use_kfold` | 是否启用 K 折交叉验证 | false |
-| `--n_folds` | 外层折数，至少2 | 10 |
-| `--kfold_val_ratio` | 外层 train 内再分给早停 val 的比例 | 0.1 |
-
-外层使用 `KFold(shuffle=True, random_state=seed)`，每个个体恰好进入 test 一次。
-内层在剩余个体中按 `kfold_val_ratio` 划出 val，随机种子为 `seed + fold - 1`。
-例如2折、400个体、默认比例时，每折约180个 train、20个 val、200个 test。
-普通模式的 train/val/test_ratio 不控制此划分；单次 `split_file` 不能用于外层 K 折。
-
-每折先固定三组原始行号，仅训练行拟合 GWAS/DC-SIS、筛选众数、Wide 众数和表型 scaler；
-原始列索引应用于三组类别 SNP 后，按该折真实维度初始化全新 TFPP、优化器和调度器。
-只用 val 早停和选模型，恢复最佳权重后仅评估 test 一次，预测导出复用该次前向结果。
-模型初始化种子为 `seed + fold`（fold 从1开始），前一折训练轮数不影响下一折初态。
-多表型联合/逐表型并集及 screen_k/gwas_k 仍按显式配置执行；缓存包含 fold 编号和训练行/内容指纹。
+使用保存的实验目录进行推理：
 
 ```bash
-.venv/bin/python -B train.py --exp_name maize_cv --use_kfold true --n_folds 2 \
-  --kfold_val_ratio 0.1 --screen_missing_strategy mode --num_workers 0
-
-.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_cv/folds/fold_01 \
-  --snp_file dataset/maize/snp/snp_50000.npy --device cpu
+uv run python infer.py --model_path outputs/tfpp/maize_rgbvi
 ```
 
-产物布局（K折始终保存每折可复现产物，即使传入 `--is_save false`）：
-
-```text
-outputs/tfpp/maize_cv/
-├── folds/fold_01/            # fold_02、fold_03... 同结构
-│   ├── preprocessing/       # schema 3 JSON、split.npz、screened_indices.npy
-│   ├── scalers/scaler.pkl
-│   ├── models/              # best_model.pt（含 Wide buffer）、model_config.json
-│   ├── training_history/
-│   ├── config.json
-│   ├── metrics.json
-│   ├── test_predictions.npz # 归一化/原尺度预测及标签、sample_id、sample_idx、fold
-│   └── test_predictions.csv
-└── training_history/
-    ├── kfold_summary.json   # 各折明细、总体及每表型指标均值/标准差
-    ├── kfold_fold_details.csv
-    ├── kfold_overall_stats.csv
-    ├── kfold_phenotype_stats.csv
-    └── kfold_predictions.csv # 按原始 sample_idx 排序，携带 sample_id、fold、phenotype
-```
-
-标准差使用 `ddof=0`，保留每折 PCC，不能以混合全部预测的单个 PCC 替代折间统计。
-当前 sample_id 明确为稳定行索引，不代表已有生物学 ID。每折目录可独立通过严格推理哈希校验；
-已有折 split 与新配置冲突时拒绝覆盖，应使用新实验目录。
-
-> **Note:** 布尔参数 (`--is_save`, `--use_warmup`, `--use_kfold`) 接受 `true`/`false` 字符串。
-
-## 推理 (`infer.py`)
-
-推理默认要求实验目录中有 `models/best_model.pt`、`models/model_config.json`、
-`preprocessing/{preprocessing.json,split.npz,screened_indices.npy}` 和 `scalers/scaler.pkl`。
-缺少产物时直接报错，不重新筛选、不重新拟合 scaler 或缺失填充值。
+输入 SNP 的列顺序和训练时的筛选设置必须一致。更多参数请查看：
 
 ```bash
-# 保存的 test_idx + 保存的原始列索引；不需要读取表型
-.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
-  --snp_file dataset/maize/snp/snp_50000.npy --device cpu
-
-# 可选读取测试标签：仅使用训练 scaler.transform，CSV 增加 True 列
-.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
-  --snp_file dataset/maize/snp/snp_50000.npy --pheno_dir dataset/maize/cleaned_pheno
-
-# 原始全维剂量输入：校验原始维度，然后按训练索引切片
-.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
-  --input_snp external_raw.npy --input_stage raw --output outputs/infer/raw.csv
-
-# 已筛选剂量输入：列序必须与 screened_indices.npy 一致，不再切片
-.venv/bin/python -B infer.py --model_path outputs/tfpp/maize_rgbvi \
-  --input_snp external_screened.npy --input_stage screened
+uv run python infer.py --help
 ```
 
-两种外部输入均为二维 dosage `0/1/2`，缺失只能标为 `-1` 或 `NaN`，不是模型类别码。
-必须显式指定 `--input_stage`，即使原始维度恰好等于筛选后维度。Deep 保留缺失类别0；
-Wide 使用 checkpoint 内的训练填充值恢复剂量后除以2，推理期间禁止重新拟合。
-`wide_missing_strategy=error` 的实验持久化空填补 buffer，拒绝任何筛选后缺失输入。
+## 开发检查
 
-测试集原始数据必须保持训练时的个体行序；当前 sample_id 是行索引，不是生物学个体 ID。
-可选表型 CSV 同样必须保持行序和训练时间点顺序。输出 `sample_idx` 是保存的原始个体索引。
-`--batch_size`（默认32）控制批量大小，`--device cpu` 可强制 CPU。
-不再接受推理期 seed、划分比例、screen_k/gwas_k 或 scaler_type 来重建预处理。
-
-新训练保存 schema 3 预处理记录，包含 split、筛选索引、scaler、Wide 填充值的哈希及时间坐标；
-完整的第2步 schema 2 产物仍可读取，Wide 填充值必须与 checkpoint buffer 一致。
-每次推理输出 CSV 和同名 `.metadata.json`，记录 checkpoint/产物哈希及时间坐标。
-
-旧 checkpoint 默认拒绝；仅诊断性复现可显式使用：
+代码修改后可进行语法检查：
 
 ```bash
-.venv/bin/python -B infer.py --model_path outputs/tfpp/old_experiment --legacy \
-  --input_snp old_screened_dosage.npy --input_stage screened
+uv run python -m compileall config dataloader model trainer utils train.py infer.py
 ```
 
-legacy 会打印醒目警告，只接受外部 screened 数据，不猜测旧测试划分或重做监督筛选。
-保留旧 categorical Wide 语义，CSV 与 JSON 均标记 `legacy=true, paper_eligible=false`，
-不得进入论文正式实验汇总；旧三类别模拟 checkpoint 不可与新的四类别输入编码混用。
-新格式产物损坏或缺失时，`--legacy` 不能绕过校验。`--scaler_path` 仅可用于 legacy。
-
-CPU 合成测试（无需真实数据或 GPU）：
-
-```bash
-.venv/bin/python -B -m unittest discover -s tests -v
-git diff --check
-```
-
-## ConvAE 潜在特征导出（第7步）
-
-`export_convae.py` 只通过严格 `load_convae_model()` 加载当前 split/fold 上由 train
-训练、由 val 选出的 `models/best_model.pt`；第6步的 schema 3 产物和 v2 checkpoint
-继续兼容。旧 `_compress_data()` 入口明确报错，不能绕过最佳模型/产物校验。
-训练不自动导出；TFPP 模型及输入接口保持原样。
-
-```bash
-.venv/bin/python -B export_convae.py \
-  --model_path outputs/convae/<experiment>/<split_or_fold> \
-  --split_file splits/individuals_n400_seed73.npz \
-  --snp_file dataset/maize/snp/snp_50000.npy --batch_size 32 --device cpu
-```
-
-`--model_path` 使用训练日志中的实际实验目录；K折传入训练时使用的同一 fold manifest。
-`--split_file` 必须显式指定，校验文件 SHA256 与保存的三组索引；不按 seed 重建。
-`--snp_file` 可省略，默认保存配置中的原始 dosage 文件（0/1/2，缺失 -1/NaN）。
-当前 sample_id 是原始行索引，SNP 文件必须保持原个体行序，无法鉴别无 ID 文件的生物学身份。
-可用 `--checkpoint_sha256 <hash>` 和 `--model_config <models/model_config.json>`
-进一步绑定任务预期。缺少产物、哈希/配置不符或非法 SNP 编码均失败。
-
-`ConvAE.encode_features(x, padding_mask=...) -> Tensor[B,D]` 使用 `eval()` 和
-`inference_mode()`；只走编码器，不调用表型头/decoder、不抽随机掩码、不读表型 CSV。
-严格加载器仍校验训练 scaler 的完整性，但它不传入编码函数或参与特征计算。
-Deep 输入为模型类别码，真实缺失保留0；结构性 padding 由独立 mask 排除。
-表示固定为 chunk-major C-order 展平：`D = num_chunks * d_ext`，
-`column = chunk_index * d_ext + feature_index`，按 SNP 起点递增保留最后不完整 chunk。
-
-默认产物：
-
-```text
-<experiment>/exports/<split_fingerprint>/<checkpoint_sha256>/<snp_file_sha256>/
-├── metadata.json
-└── features/
-    ├── train.npy             # float32 [N_train, D]
-    ├── train_sample_ids.npy  # int64 [N_train]，manifest 顺序
-    ├── val.npy
-    ├── val_sample_ids.npy
-    ├── test.npy
-    └── test_sample_ids.npy
-```
-
-`--output_root` 可改导出根目录；不同 split/fold、checkpoint、SNP 内容分别寻址。
-已存在目录禁止覆盖，重复独立复现应使用另一输出根目录。
-`encode_feature_batches()` 将批次按 sample_id 恢复 manifest 原序，拒绝重复、缺失或额外 ID。
-写入后 `load_exported_features()` 重新校验每个文件 SHA256、shape、dtype、有限值及 ID 顺序；
-写入/校验失败清理本次新目录。
-
-metadata 摘要示例（40个合成个体、13 SNP、chunk_size=8、overlap=2、d_ext=4）：
-
-```json
-{
-  "export_schema_version": 1,
-  "preprocessing_schema_version": 3,
-  "latent_layout": "chunk_major_flatten_C_order",
-  "original_snp_dim": 13,
-  "num_chunks": 2,
-  "d_ext": 4,
-  "latent_dim": 8,
-  "reconstruction_mask_ratio": 0,
-  "encoder_only": true
-}
-```
-
-完整 JSON 另含 git commit/dirty、split/fold/样本顺序、checkpoint 和数据文件路径/哈希、
-配置及模型选择口径、表型/时间点、编码与 padding 规则、每组数组 shape/dtype/文件内容哈希。
-同 checkpoint/输入重复导出相同，CPU 不同 batch size 的测试容差为 `rtol=1e-5, atol=1e-6`。
-
-CPU 合成冒烟测试自动在临时目录生成40个体、13 SNP、真实缺失与结构性 padding，
-单轮训练最小模型后通过上述 CLI 导出三集合（24/8/8行，每行8维），结束清理临时产物：
-
-```bash
-.venv/bin/python -B -m unittest discover -s tests -p test_convae_export.py -v
-.venv/bin/python -B -m unittest discover -s tests -v
-git diff --check
-```
-
-## ConvAE 独立 Ridge 下游基线（第8步）
-
-`ridge_convae.py` 仅用于评价“ConvAE 表征的独立线性探针/下游基线”，
-不等同于 TFPP 的同构模型比较，也不能据此声称 ConvAE 优于监督式 SNP 筛选。
-本步骤不增加 MLP、不改变 TFPP 或 ConvAE，不自动执行正式实验。
-
-模型固定为多输出 `Ridge(fit_intercept=True, solver="lsqr", tol=1e-6, max_iter=10000)`；
-目标按 phenotype-major、time-minor 顺序从 `[N,P,T]` 展平为 `[N,P*T]`。
-alpha 固定为 `[1e-4,1e-3,1e-2,1e-1,1,10,100,1000,10000]`，不提供覆盖选项。
-每个候选只在 train 上 fit；按归一化尺度整体 val MSE 选择，数值并列
-（`rtol=1e-12, atol=1e-12`）取较大 alpha。保留选中的 train-only 模型，不合并 val 重拟合。
-连续特征逐列 Z-score、表型按各表型全时间点 global Z-score，均只 fit train。
-表型 scaler 独立拟合并保存，不复用 ConvAE scaler；缺失表型明确报错。
-
-标签采用显式 ID 的 NPZ，不猜测或自动重排；字段为：
-
-```text
-phenotype_names, time_labels                 # 必须与 export metadata 同序
-train_phenotype, train_sample_ids             # 原始量纲 [N_train,P,T]、[N_train]
-val_phenotype, val_sample_ids
-test_phenotype, test_sample_ids              # 同样为 manifest 原序
-```
-
-可用 `utils.ConvAE_Ridge.save_probe_targets()` 建立此文件。以下仅展示已有数据如何打包，
-CSV 必须已确认与原始 SNP/sample_id 行序一致；行索引不代表生物学身份验证：
-
-```python
-import numpy as np
-import pandas as pd
-from utils.ConvAE_Export import load_exported_features
-from utils.ConvAE_Ridge import save_probe_targets
-from utils.Split import load_split
-
-arrays, meta = load_exported_features(export_dir)
-split = load_split(meta["split_file"])
-raw = np.stack([pd.read_csv(f"{pheno_dir}/{name}.csv").to_numpy()
-                for name in meta["phenotype_names"]], axis=1)
-targets = {role: (raw[getattr(split, role + "_idx")], arrays[role][1])
-           for role in ("train", "val", "test")}
-save_probe_targets("ridge_targets.npz", targets,
-                   phenotype_names=meta["phenotype_names"], time_labels=meta["time_labels"])
-```
-
-运行示例（不自动执行）：
-
-```bash
-.venv/bin/python -B ridge_convae.py \
-  --export_dir <第7步导出目录> --phenotype_file ridge_targets.npz \
-  --output_root outputs/baselines/convae_ridge --seed 73
-```
-
-先校验所有特征/ID 文件哈希，再与独立 split/fold manifest 逐行比较。
-`--split_file` 可提供迁移后的 manifest 路径，内容哈希必须保持一致。
-train/val 标签分别读取；九个候选搜索结束后才读取 test 标签并评估一次，
-状态保存为 `test_evaluation_count=1`，重复评估入口明确失败。
-重新加载模型仅做无标签预测复现，不增加测试指标评估次数。
-
-产物目录为 `<output_root>/<export_metadata_sha256>/<baseline_config_sha256>/`，
-已存在则报错，禁止覆盖。配置哈希包含固定模型/归一化/并列规则、seed 和标签文件指纹；
-对标签做回归测试时可使用另一输出根目录。目录保存：
-
-```text
-config.json, alpha_search.json, feature_scaler.pkl, phenotype_scaler.pkl,
-ridge_model.pkl, metrics.json, test_predictions.npz, test_predictions.csv,
-summary.json, environment.json, run.log, artifacts.json
-```
-
-`metrics.json` 同时记录 normalized/denormalized 下的整体、逐表型、逐时间点、
-逐表型逐时间点五项指标。沿用 TFPP 的 `compute_metrics_vectorized()`：
-先时间列均值再按表型等权平均；R² 为时间校正全局 R²，保留负值，不截断。
-第11步已统一公共 TFPP、Ridge 和 runner 的指标协议：常数/近常数列 PCC 保留 `NaN`，
-汇总只对有限 PCC 取均值并记录有效/总列数及有效聚合数；全无效时仍为 `NaN`。
-JSON 使用 Python 可读取的 `NaN`，不会替换成0；R² 计算与模型算法未改变。旧报告中的常数 PCC=0 不可直接混入新汇总。
-预测 CSV 以 manifest 的 test sample_id 为第一排序层，其后为 phenotype/time 原序，
-含 sample_id、split/fold 指纹、表型、时间点、原始量纲真实值和预测值。
-
-summary/environment 记录 commit/dirty、seed、split/fold、checkpoint/export 哈希、
-特征维度、训练/选择时间、预测时间和包含导入及先前工作的 Linux 进程峰值 RSS。
-所有产物带文件哈希；`load_ridge_probe()` 加载本项目产生的可信本地 pickle，
-`predict_probe()` 只变换和预测。运行结束会加载保存模型，校验 test 预测复现。
-
-CPU 合成冒烟测试生成第7步的最小 checkpoint/export，运行上述 CLI，临时产物自动清理：
-
-```bash
-.venv/bin/python -B -m unittest discover -s tests -p test_convae_ridge.py -v
-.venv/bin/python -B -m unittest discover -s tests -v
-git diff --check
-```
-
-## 配置驱动实验与结果追溯（第10步，spec/result schema 1）
-
-`run_experiments.py` 负责计划、校验、状态、运行和严格汇总；不实现第9步的连续 TFPP。
-`experiments/example.spec.json` 是需要填写真实文件指纹和时间列的示例，零哈希不是有效数据。
-`experiments/spec.py` 定义严格 Pydantic spec，`results.py` 定义状态/结果 schema。
-每条 `experiments` 记录是明确的一个实验协议；只按给定外层 folds 展开，不自动做全轴组合。
-
-核心 spec 结构如下（路径相对于 spec 文件；所有 SHA256 必须填入真实值）：
-
-```json
-{
-  "schema_version": 1,
-  "data": {
-    "snp": {"path": "snp.npy", "sha256": "<文件SHA256>"},
-    "phenotypes": {"RGBVI": {"path": "RGBVI.csv", "sha256": "<文件SHA256>"}},
-    "n_samples": 400, "n_snps": 50000,
-    "sample_id_source": "row_index", "sample_ids_sha256": "<manifest中的ID顺序哈希>",
-    "time_labels": ["10", "12"], "time_coordinates": [10, 12]
-  },
-  "splits": {"mode": "regular", "manifests": [{"path": "split.npz", "sha256": "<文件SHA256>"}]},
-  "experiments": [{
-    "route": "GWAS->DC-SIS", "traits": ["RGBVI"], "seed": 73,
-    "train_size": {"fraction": 0.5}, "gwas_k": 10000, "k": 1000,
-    "screening_mode": "joint", "ablation": "full",
-    "tfpp": {"epochs": 200, "screen_missing_strategy": "mode", "device": "cpu"}
-  }],
-  "output_root": "outputs/experiments"
-}
-```
-
-时间列必须覆盖实际 CSV 的完整列和顺序；示例仅展示两个时间点，不隐式截取原始 CSV。
-`file_digest(path)` 提供分块内容 SHA256。大数据的声明指纹在实际运行前核实。
-普通模式只能有一个普通 manifest；K折须提供完整 fold 1..K，且每个样本恰好 test 一次。
-所有路线读取同一个外层 split/fold 集合，seed 只控制训练、随机位点和嵌套子集，不重新分外层集合。
-当前数据没有生物学 ID，明确使用行索引及顺序哈希，不能据此鉴别未记录的生物学行重排。
-
-已支持路线（名称区分大小写）：
-
-| route | 输入与筛选 |
-| --- | --- |
-| `fixed_indices` | 必须给 `fixed_indices: {path, sha256}`，校验非空/整数/范围/唯一性，保留文件原列序 |
-| `random_k` | 只由训练基因型列数、k、seed 生成并保存有序索引，不接触表型 |
-| `GWAS` | 训练行拟合 GWAS；k 使用 `gwas_k` |
-| `DC-SIS` | 训练行拟合 DC-SIS；k 使用 `k` |
-| `GWAS->DC-SIS` | 显式在 GWAS 候选列内做 DC-SIS，包含小 SNP 矩阵，不使用旧并行并集启发式 |
-| `ConvAE->Ridge` | 按 manifest 顺序提供 `exports: [{path: ".../metadata.json", sha256: "..."}]`，复用第7/8步 |
-
-监督筛选可选 `screening_mode=joint` 或 `per_trait_union`，method id 分开。
-保存各阶段原始列索引、逐性状入选及独占数量、去重前后数量、最终有序索引哈希；
-联合关联没有独立性状归因，不伪造贡献数。实际维度从保存的 `screened_indices.npy` 读取。
-筛选缺失策略由 `tfpp.screen_missing_strategy` 控制，所有 fit 只用本子集训练行。
-runner 禁用内部筛选缓存，TFPPTrainer 通过 `preselected_snp_file` 复用外部已保存索引。
-
-TFPP 消融明确映射 `full→all`、`wide_only→wide`、`deep_only→deep`、
-`no_gate_add→add`；最后一项是已有的直接相加路径，本步骤有真实训练/反向测试。
-未知消融明确拒绝，不回退 full；任何 `continuous_feature` 路线当前明确失败。
-ConvAE->Ridge 不接受 TFPP 消融或配置，模型仍为第8步固定 Ridge。
-
-`train_size` 恰好提供 `count` 或 `fraction`（向下取整，至少2个训练个体）。
-只在原 train 中按 `SHA256(seed,sample_id)` 稳定排序取前缀，随后恢复原 manifest 行序；
-较小集合严格包含于较大集合，val/test 完全不变。保存原 train、排除行、子集规则及哈希。
-`IndividualSplit` 新增可选 excluded_train_idx/parent_train_idx 约定：
-train+val+test+明确排除的原训练行必须互斥并完整覆盖个体；普通旧 manifest 行为不变。
-每个子集重新拟合筛选、填补、表型 scaler 和新模型。
-ConvAE export 必须由同一子集/fold 的编码器产生，不能把全 train 编码器用于较小训练集对比。
-
-命令：
-
-```bash
-# 只读计划：校验小型 split/JSON/固定索引及依赖，不载入 SNP/表型/潜在特征大数组，不写结果
-.venv/bin/python -B run_experiments.py dry-run experiments/example.spec.json
-
-# 显式正式运行；须先完善 spec，并提交代码使工作区 clean
-.venv/bin/python -B run_experiments.py run <真实spec.json>
-
-# 仅相同配置、代码版本/dirty tree、数据指纹和 split 的安全恢复
-.venv/bin/python -B run_experiments.py run <真实spec.json> --resume
-
-# 本步骤允许的实际执行：40个体、13 SNP、单轮CPU，六条路线全部走通
-.venv/bin/python -B run_experiments.py smoke --directory /tmp/dynags_experiment_smoke
-
-# smoke 生成的可用 spec 也可执行 dry-run；目录已存在不会写伪结果
-.venv/bin/python -B run_experiments.py dry-run /tmp/dynags_experiment_smoke/spec.json --development-smoke
-.venv/bin/python -B run_experiments.py summarize <run_hash目录> <另一个run_hash目录>
-```
-
-正式运行默认拒绝 dirty 工作区；`--development-smoke` 仅用于开发，显式记录到配置和汇总轴。
-运行 hash 覆盖 resolved 数据/模型/损失/早停/指标口径、所有轴、split、commit/dirty tree 指纹。
-每次执行重验数据内容及实际 shape。默认禁止覆盖相同 hash。
-resume 的成功实验只校验并返回，不重训/重测；test 前失败允许新 attempt 从头重启，保留旧错误日志。
-不支持中途优化器状态续训。test 预约持久化后，无论成功与否均禁止失败重试中重测。
-数据、split、代码或配置变化必须作为新实验；`--resume` 不会自动寻找相似旧目录。
-
-产物示例：
-
-```text
-outputs/experiments/<canonical_config_sha256>/
-├── resolved_config.json
-├── status.json                  # running / failed / success，attempt、test_evaluation_count
-├── manifest.json                # ResultManifest schema 1，实验轴、样本身份、维度、参数量、耗时、资源峰值
-├── artifacts.json               # 配置、manifest、split、模型、scaler、history、特征/索引、预测、指标哈希
-└── attempt_001/
-    ├── split.npz                # 原始行索引，子集保留 excluded train 元数据
-    ├── selection.json           # TFPP：各阶段/性状贡献、训练指纹及筛选填补
-    ├── screened_indices.npy
-    ├── backend_config.json
-    ├── backend/                 # 复用原 TFPPTrainer 的 schema 3 预处理、checkpoint、scaler、训练历史与日志
-    ├── predictions.npz          # manifest 顺序的 sample_ids、预测、标签
-    ├── predictions.csv          # sample_id、fold、split、trait、time、真实值、预测
-    ├── metrics.json             # 归一化/原尺度，各四层指标；保留负R²及未定义PCC
-    └── environment.json
-```
-
-Ridge attempt 另存 `ridge/` 的完整第8步产物、export metadata 副本和特征数组哈希引用。
-参数量及实际 D 来自已运行模型/已保存产物；耗时区分筛选、训练、验证和推理。
-ConvAE->Ridge 的训练/验证时间指 Ridge，不冒充重新训练编码器的时间。
-CPU RSS 是注明范围的 Linux 进程高水位；GPU 记录峰值 allocated 显存；CPU smoke 为0。
-失败保留 resolved config、status、attempt/error.log，不以空值或旧结果冒充成功。
-
-汇总只接受版本/schema、success、配置/commit、所有产物哈希及预测身份校验通过的运行。
-保留 mode、split family、seed、train size、trait set、route/method id、ablation、fold 和完整协议 hash。
-不同 k、模型/优化配置、数据、代码或开发/正式状态不会混合；重复 fold 不重复计权。
-fold 未齐全时标记 incomplete，不计算均值/std；齐全后输出每折明细及各层指标均值/std（ddof=0）、有效数。
-普通 split 与K折始终分组。CLI run 在 `summaries/<计划hash>.json` 保存汇总，不覆盖变化内容。
-smoke 将真实合成结果保存在指定目录和 `smoke_summary.json`，不会进入正式数据目录。
-
-```bash
-.venv/bin/python -B -m unittest discover -s tests -p test_experiments.py -v
-.venv/bin/python -B -m unittest discover -s tests -v
-git diff --check
-```
-
-## 第11步实验前审计与当前资格
-
-完整报告见 [docs/EXPERIMENT_READINESS.md](docs/EXPERIMENT_READINESS.md)。审计基线为
-`eb326d90fe65068403739ff7c71c183ac018d00e`，第8步与第10步分别独立提交；本次未运行真实数据。
-当前六条 runner 路线均通过 CPU 合成端到端检查。`continuous_feature` TFPP 与未知消融仍明确拒绝。
-
-训练和每折的唯一拟合范围均为当前 train/subset：筛选、众数填补、表型 scaler、Ridge feature scaler。
-val 只早停/选模型或 alpha；test 只有选定模型后的一次正式评估。改变有效的 test 标签不改变
-训练产物、权重、特征或预测；test SNP 变化可以改变对应样本预测，不改变训练期拟合。
-K折的此约束按每一折定义，某折 test 个体可能属于另一折 train，不要求后者模型也保持不变。
-
-普通 TFPP 初始化及 TFPP/ConvAE 的正式训练阶段现在显式使用配置 seed；提前构建其他模型或检查 batch 不改变训练轨迹。TFPP 和 ConvAE CLI 默认值均来自对应 Pydantic 配置；
-`screen_multivariate=true`、`screen_k=gwas_k=10000`、筛选缺失 `error`、Wide 缺失 `mode`、seed=73。
-ConvAE 的数据路径、global 归一化与 TFPP 的默认 residual_global 不必相同，均必须使用同一份明确 split。
-推理不接受重新拟合；其筛选/填补/scaler/input mode 从产物读取。`--screen_multivariate` 仅保留兼容参数。
-
-新增保护与兼容性：
-
-- 完成训练时生成 `models/checkpoint_integrity.json`，绑定权重、模型配置、split、scaler 与预处理；
-  删除或损坏清单/同形状权重会失败，不用 legacy 绕过。
-- 已有 checkpoint 或 test 预约的独立训练目录禁止覆盖；runner 失败后的 test 预约另有独立持久记录，
-  即使 status 回到 count=0 也不能重测。成功 resume 仅校验返回，失败在 test 前才能新 attempt 从头重启。
-- 新 TFPP 记录 CSV 时间列顺序；推理可选标签必须完全同序。测试集回放还核对原始训练 SNP 行指纹。
-  ConvAE 导出核对训练 SNP 内容，编码只收 SNP/mask/ID，绝不调用表型头。
-- 新结果清单必须含 `metrics_protocol=time_adjusted_r2_nan_pcc_v2`、`std_ddof=0` 和 `replay_verified=true`。
-  汇总验证 CSV/NPZ 的身份、fold、数值一致，并按保存预测复核指标；无此审计字段的旧 runner 结果拒绝正式汇总。
-- 完整的旧 schema 2/3 TFPP 产物可作诊断加载，但未封存 checkpoint 的 `paper_eligible=false`；
-  更旧的不完整 checkpoint 仍须 `--legacy`，禁止用于论文。旧 ConvAE v2 未封存产物也仅诊断加载，
-  对应 export 不进入新的 Ridge/runner 正式基线。形状或旧14维裸权重不自动迁移。
-- 格式可读不等于论文资格：历史结果需要当前代码、正确 split、可验证产物与统一指标口径，不能通过补写字段追认。
-
-当前 `sample_id` **只有稳定行索引，没有生物学 ID**。正式 runner 会拒绝与声明 SHA256 不符的数据文件
-及其行/列重排；同一数值文件的生物学身份不能由行索引证明，需要实验者确认来源和样本/位点顺序。
-外部推理有意允许新个体/新 genotype，但必须显式 `raw` 或 `screened`，列顺序必须与训练一致。
-只有测试行的 genotype 改变仍可回放预测，不能据此假称验证了生物学身份。
-
-以下命令的 CLI 和保存加载路径均用临时合成输入实际验证；真实路径/性状/完整时间列必须先准备，
-本审计没有执行这些真实数据模板。重复运行使用新 exp_name，不覆盖已有实验：
-
-```bash
-# 普通 TFPP；跨方法比较请优先使用 runner spec 固定全部数据/划分指纹
-.venv/bin/python -B train.py --exp_name NEW_EXP --split_file <shared.npz> \
-  --snp_file <raw.npy> --pheno_dir <pheno_dir> --pheno_names A B \
-  --time_coordinates 1 2 3 --screen_missing_strategy mode
-
-# K折，生成的 fold manifests 可给 ConvAE 和统一 runner 复用
-.venv/bin/python -B train.py --exp_name NEW_CV --use_kfold true --n_folds 2 \
-  --snp_file <raw.npy> --pheno_dir <pheno_dir> --pheno_names A B \
-  --time_coordinates 1 2 3 --screen_missing_strategy mode
-
-.venv/bin/python -B train_convae.py --exp_name NEW_MAE --split_file <shared_or_fold.npz> \
-  --snp_file <raw.npy> --pheno_dir <pheno_dir> --pheno_names A B --time_coordinates 1 2 3
-.venv/bin/python -B export_convae.py --model_path <MAE_DIR> --split_file <shared_or_fold.npz> --snp_file <raw.npy>
-.venv/bin/python -B ridge_convae.py --export_dir <EXPORT_DIR> --phenotype_file <targets.npz>
-.venv/bin/python -B infer.py --model_path <TFPP_OR_FOLD_DIR> --snp_file <raw.npy> --device cpu --output <new_predictions.csv>
-.venv/bin/python -B run_experiments.py dry-run <spec.json>
-.venv/bin/python -B run_experiments.py run <spec.json>
-.venv/bin/python -B run_experiments.py summarize <run_hash_dir> <another_run_hash_dir>
-
-# 可独立复现的全部合成 CLI/泄漏/回放检查，无需真实数据
-.venv/bin/python -B -m unittest discover -s tests -p test_readiness.py -v
-.venv/bin/python -B run_experiments.py smoke --directory /tmp/dynags_step11_smoke
-.venv/bin/python -B run_experiments.py dry-run /tmp/dynags_step11_smoke/spec.json --development-smoke
-.venv/bin/python -B -m unittest discover -s tests -v
-git diff --check
-```
-
-审计已验证152项完整测试。CPU 合成通过代表实现与产物链可用，不代表真实预测性能、GPU 数值一致性或大数据资源预算已验证。
-正式实验前需固定真实文件 SHA256、实际 N/P、完整时间列/坐标、trait set、共享普通 split 或完整 folds、
-train-size 计划和独立输出根目录；提交代码并保持 clean 后再启动。保留 spec、所有产物、每折明细和指标有效计数。
-
-## 第12步：真实输入只读体检与冻结
-
-`inspect_real_data.py` 只描述和冻结数据，不训练、不运行GWAS/DC-SIS，不产生筛选索引或test指标。
-唯一正式输入为下述明确路径；`snp_50000.npy`、`snp_mi_*`、模拟数据和清洗/三性状目录不会自动替代。
-`all_phenotype_h2.csv`、`gene_snp_mapping.csv`只登记辅助哈希，不作训练输入。
-
-```bash
-# 只在用户已确认这些当前源文件行序一致时提供确认日期；本项目确认日期为2026-10-22
-.venv/bin/python -B inspect_real_data.py \
-  --snp_file dataset/maize/snp/snp_2860770.npy \
-  --pheno_dir dataset/maize/pheno \
-  --output_root outputs/preflight --attestation_date 2026-10-22
-
-# 每次使用前重验当前字节和完整源清单；只读、零结果写入
-.venv/bin/python -B inspect_real_data.py \
-  --verify_manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json
-
-.venv/bin/python -B -m unittest discover -s tests -p test_real_data_preflight.py -v
-```
-
-NPY按header核对真实shape、方向和C/F顺序，用只读mmap按列块统计0/1/2、NaN/-1、逐列缺失率、
-MAF与总体方差摘要。MAF分母只含已观测二倍体剂量；全缺失列的MAF/方差未定义，不冒充零。
-这些全体描述统计不能作为正式筛选/填补/QC拟合结果；后续仍只在train/subset/fold拟合。
-CSV时间列须能解析且原本已按数值自然顺序排列；重复、乱序、网格不同、非有限表型、非法剂量或疑似转置
-立即保存blocked报告并停止，不自动重排、转置、填补或删列。时间标签的数字不证明其生物学单位，须另确认。
-
-当前没有生物学ID/顺序映射：冻结行索引`0..N-1`，证据为`user_source_order_attestation`，
-状态为`confirmed_by_user_source_order`，不能写成`verified_by_biological_id`。
-每次确认绑定SNP和全部性状当前SHA256；源文件内容、顺序或性状清单变化后，旧manifest验证失败，必须重新确认。
-重复扫描也检查同一输出根目录的既有确认；源哈希变化时仅沿用旧日期会被阻塞。重新确认后才可用`--attestation_file`提供
-含`evidence_type`、`attestation_date`及`source_hashes`（snp哈希与phenotypes文件名→哈希）的凭据；脚本不自动签发新确认。
-如果发现真实ID或外部映射候选，必须先检查，不能默默降级行号；显式`--snp_ids_file`可验证SNP行ID与各表型ID。
-当前实验runner只支持row_index，不会将生物学ID清单静默转换。
-
-私有结果全部保存在Git忽略的`outputs/preflight/<canonical_hash>/`：manifest、扫描报告、
-冻结sample_ids、性状候选表、`experiment.template.json`和`next_steps.txt`。
-manifest自哈希是去除`manifest_sha256`字段后的UTF-8 canonical JSON（排序key、紧凑分隔、无NaN）的SHA256。
-已有同哈希目录禁止覆盖。公开[schema](schemas/real_data_manifest.schema.json)及
-[虚构脱敏示例](examples/real_data_manifest.redacted.json)不含真实路径、哈希、表型值或个体信息。
-
-下一步只准备模板，本步骤不创建真实split、不执行experiment dry-run。先验证manifest，再由其FileRefs填写实验spec；
-runner目前不接收`real_manifest`字段，不得把模板当成已执行或已获正式资格的实验。
-需预先确定主要性状（不按预测效果排序）、全部时间列/坐标含义、K折数、seed、训练比例、候选k/gwas_k和输出根目录。
-普通split创建模板见私有`next_steps.txt`；完成spec后使用`run_experiments.py dry-run <SPEC.json>`。
-正式启动仍须锁定clean代码提交；体检时的dirty状态如实记录，不构成正式运行资格。
-
-## 第13步：真实数据工程 pre-test smoke
-
-`engineering_pretest.py` 是显式的 train/val-only 工程阶段。它复用 TFPP 的生产训练、验证、
-checkpoint 和严格加载路径，但只解析固定 split 中的 train/val 表型行；不会创建 test loader、
-读取 test 表型、预约 test 评估或生成 test 预测/指标。所有产物固定标记
-`purpose=engineering_pretest_smoke`、`paper_eligible=false`，正式汇总器会拒绝该目录。
-
-```bash
-# 零写入计划：重验冻结 manifest、固定 seed=73 的 320/40/40 split、配置 hash、磁盘和输出路径
-.venv/bin/python -B engineering_pretest.py dry-run \
-  --manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json \
-  --output_root outputs/engineering_pretest_smoke
-
-# 分别运行一个 epoch；只能用于工程闭环，不报告为论文性能
-.venv/bin/python -B engineering_pretest.py run --route random_k \
-  --manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json \
-  --output_root outputs/engineering_pretest_smoke
-.venv/bin/python -B engineering_pretest.py run --route gwas_dc_sis \
-  --manifest outputs/preflight/<MANIFEST_HASH>/real_data_manifest.json \
-  --output_root outputs/engineering_pretest_smoke
-
-.venv/bin/python -B -m unittest discover -s tests -p test_engineering_pretest.py -v
-```
-
-`random_k` 只依赖原始列数和 seed。GWAS 的 PCA 群体结构校正在第13步前已存在；普通训练、
-K折和正式 runner 仍在各自 train 矩阵的全部当前 SNP 上拟合5个PC。工程串联路线为避免复制
-完整真实矩阵，新增只读 mmap 分块实现：先用20,000个按原始列位置均匀确定性抽取、与标签无关
-且不使用随机panel seed的 marker 拟合5个PC，再对全部列执行
-train-only GWAS，保留 5,000 列并用生产 DC-SIS 缩至 1,000。每列 mode、表型 scaler 和
-Wide 填充值仅由 320 个 train 个体拟合；Deep 保留缺失类别 0，Wide 用训练众数恢复剂量后除以2。
-PCA只做train均值中心化，不按标准差缩放；零方差marker被记录并安全保留。显式配置与产物记录
-`gwas_population_structure`、PC数、panel大小/seed、算法版本、panel原始列索引及哈希、train中心/
-填补/PCA得分哈希。目录 hash 绑定数据 manifest、路线、筛选参数、代码 commit/dirty tree 和工作树哈希；
-相同配置拒绝覆盖。
+`dataset/` 与 `outputs/` 在当前环境中可能是本地软链接；迁移到其他机器时，请重新创建它们或在命令中指定实际路径。
