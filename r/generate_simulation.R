@@ -10,7 +10,8 @@ parse_args <- function(args) {
   defaults <- list(
     output_dir = "/root/DynaGS/dataset/sim_data/staging/scenario_smoke/rep_01",
     scenario = "smoke", rep = 1L, n_samples = 100L, n_snps = 200L,
-    n_qtl = 20L, n_timepoints = 20L, heritability = 0.5,
+    n_qtl = 20L, qtl_pool_size = 200L,
+    n_timepoints = 20L, heritability = 0.5,
     ld = 0.3, dominance_ratio = 0.3,
     prop_add = 0.4, prop_dom = 0.3, prop_mixed = 0.3,
     n_epistasis = 0L, epistasis_strength = 0.5,
@@ -21,7 +22,7 @@ parse_args <- function(args) {
     key <- gsub("-", "_", sub("^--", "", args[[i]]))
     if (!key %in% names(defaults)) stop("Unknown argument: ", args[[i]])
     value <- args[[i + 1]]
-    if (key %in% c("rep", "n_samples", "n_snps", "n_qtl", "n_timepoints",
+    if (key %in% c("rep", "n_samples", "n_snps", "n_qtl", "qtl_pool_size", "n_timepoints",
                    "n_epistasis", "seed")) {
       value <- as.integer(value)
     } else if (key %in% c("heritability", "ld", "dominance_ratio",
@@ -47,6 +48,9 @@ if (dir.exists(args$output_dir) && !args$overwrite) {
   stop("Output directory already exists; refusing to overwrite: ", args$output_dir)
 }
 if (args$n_qtl > args$n_snps) stop("n_qtl cannot exceed n_snps")
+if (args$qtl_pool_size < args$n_qtl || args$qtl_pool_size > args$n_snps) {
+  stop("qtl_pool_size must be between n_qtl and n_snps")
+}
 if (args$n_timepoints < 2) stop("n_timepoints must be at least 2")
 
 parent <- dirname(args$output_dir)
@@ -60,6 +64,7 @@ sim <- simulate_dynamic_LOP_Logistic_Types(
   N = args$n_samples,
   P = args$n_snps,
   nQTL = args$n_qtl,
+  qtl_pool_size = args$qtl_pool_size,
   tgrid = seq_len(args$n_timepoints),
   LD_r = args$ld,
   h2_target = args$heritability,
@@ -74,14 +79,17 @@ sample_ids <- rownames(sim$G)
 time_names <- paste0("T", sim$Time)
 colnames(sim$Y) <- time_names
 colnames(sim$GV) <- time_names
+colnames(sim$Y_true) <- time_names
 
 fwrite(data.table(SampleID = sample_ids, as.data.table(sim$G)),
-       file.path(temporary, "genotype.csv"))
+       file.path(temporary, "sim_snp.csv"))
 fwrite(data.table(SampleID = sample_ids, as.data.table(sim$Y)),
-       file.path(temporary, "phenotype.csv"))
+       file.path(temporary, "sim_pheno.csv"))
 fwrite(data.table(SampleID = sample_ids), file.path(temporary, "sample_ids.csv"))
 fwrite(data.table(SampleID = sample_ids, as.data.table(sim$GV)),
        file.path(temporary, "true_gv.csv"))
+fwrite(data.table(SampleID = sample_ids, as.data.table(sim$Y_true)),
+       file.path(temporary, "true_curve.csv"))
 
 effects <- data.table(
   snp_index = sim$QTL_index,
@@ -124,6 +132,7 @@ configuration <- list(
   mean_realized_heritability = mean(sim$h2_realized),
   ld_parameter = args$ld,
   qtl_count = length(sim$QTL_index),
+  qtl_pool_size = sim$parameters$qtl_pool_size,
   additive_dominance = list(
     dominance_ratio = sim$parameters$dom_ratio,
     qtl_type_proportions = unname(c(sim$parameters$prop_add,

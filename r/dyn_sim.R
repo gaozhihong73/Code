@@ -62,6 +62,7 @@ simulate_dynamic_LOP_Logistic_Types <- function(
     N = 400,
     P = 2000,
     nQTL = 50,
+    qtl_pool_size = P,
     tgrid = 1:20,
     LD_r = 0.1,
     maf_range = c(0.05, 0.5),
@@ -91,6 +92,11 @@ simulate_dynamic_LOP_Logistic_Types <- function(
   }
   if (N < 3 || P < 1 || nQTL < 1 || nQTL > P) {
     stop("Require N >= 3, P >= 1, and 1 <= nQTL <= P.")
+  }
+  if (length(qtl_pool_size) != 1 || !is.finite(qtl_pool_size) ||
+      qtl_pool_size != as.integer(qtl_pool_size) ||
+      qtl_pool_size < nQTL || qtl_pool_size > P) {
+    stop("qtl_pool_size must be an integer between nQTL and P.")
   }
   if (length(tgrid) < 2 || any(!is.finite(tgrid)) || anyDuplicated(tgrid)) {
     stop("tgrid must contain at least two distinct finite time coordinates.")
@@ -130,7 +136,7 @@ simulate_dynamic_LOP_Logistic_Types <- function(
   colnames(G_raw) <- paste0("SNP", seq_len(P))
   rownames(G_raw) <- paste0("ID", seq_len(N))
 
-  QTL_idx <- sort(sample.int(P, nQTL, replace = FALSE))
+  QTL_idx <- sort(sample.int(qtl_pool_size, nQTL, replace = FALSE))
   G_QTL <- G_raw[, QTL_idx, drop = FALSE]
   qtl_types <- .allocate_qtl_types(nQTL, prop_qtl_type)
   cat("QTL Types Distribution:\n")
@@ -257,7 +263,8 @@ simulate_dynamic_LOP_Logistic_Types <- function(
     epistasis_coefs = epistasis_coefs,
     LOP_basis = LOP_basis,
     parameters = list(
-      N = N, P = P, nQTL = nQTL, lop_order = lop_order,
+      N = N, P = P, nQTL = nQTL, qtl_pool_size = qtl_pool_size,
+      lop_order = lop_order,
       LD_r = LD_r, maf_min = maf_range[1], maf_max = maf_range[2],
       mu_a = mu_a, mu_b = mu_b, mu_r = mu_r,
       h2_target = h2_target, dom_ratio = dom_ratio,

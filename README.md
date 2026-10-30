@@ -73,34 +73,26 @@ dataset/maize/
 
 ### 快速开始
 
-使用默认数据路径和配置：
+训练设置由 JSON 配置文件统一管理。使用默认真实数据配置：
 
 ```bash
-uv run python train.py --exp_name maize_rgbvi
+uv run python train.py --config config/profiles/real_data.json --exp_name maize_rgbvi
 ```
 
-指定多个表型、时间点和训练参数：
+要修改表型、时间点、模型结构、筛选数量或训练超参数，请编辑
+`config/profiles/real_data.json`；模拟数据使用 `config/profiles/simulation.json`。
+
+模拟数据批量入口默认遍历正式清单中的全部300套数据。只查看任务而不训练：
 
 ```bash
-uv run python train.py \
-  --exp_name maize_multitrait \
-  --pheno_names RGBVI GreenCoverage \
-  --time_coordinates 10 12 14 15 17 19 24 26 37 44 51 65 80 101 \
-  --epochs 200 \
-  --batch_size 32 \
-  --num_workers 0
+uv run python experiments/simulation/train_experiment2_screened.py \
+  --config config/profiles/simulation.json --plan-only
 ```
 
-小规模冒烟训练（不进行 SNP 筛选）：
+通过`--condition`和`--rep`可限定单个任务；完整用法见
+`experiments/simulation/README.md`。
 
-```bash
-uv run python train.py \
-  --exp_name smoke \
-  --epochs 1 \
-  --num_workers 0 \
-  --screen_k 0 \
-  --gwas_k 0
-```
+配置文件字段与 `TFPPConfig` 一一对应，启动时会拒绝未知字段或不符合约束的值。
 
 ### 划分与可复现性
 

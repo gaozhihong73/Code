@@ -12,11 +12,13 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 from sklearn.decomposition import PCA
+from sklearn.linear_model import MultiTaskElasticNet
+from sklearn.preprocessing import StandardScaler
 
 from .Genotype import GENOTYPE_ENCODING_VERSION, validate_dosage
 
 
-SCREENING_ALGORITHM_VERSION = "gwas_pca_rint_minp_dcsis_v3"
+SCREENING_ALGORITHM_VERSION = "conditional_residual_sparse20_v1"
 
 
 def array_fingerprint(array: np.ndarray) -> str:
@@ -68,6 +70,7 @@ def compute_cache_key(
     gwas_pca_panel_size: int | None = None,
     gwas_pca_panel_seed: int | None = None,
     gwas_pca_algorithm_version: str = "sklearn_centered_all_train_markers_v1",
+    screen_condition_k: int = 15,
     *,
     train_indices: np.ndarray | None = None,
     train_genotype: np.ndarray | None = None,
@@ -131,6 +134,7 @@ def compute_cache_key(
             "gwas_pca_panel_size": gwas_pca_panel_size,
             "gwas_pca_panel_seed": gwas_pca_panel_seed,
             "gwas_pca_algorithm_version": gwas_pca_algorithm_version,
+            "screen_condition_k": screen_condition_k,
         }
         hasher.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
         return hasher.hexdigest()
@@ -155,6 +159,7 @@ def compute_cache_key(
         "gwas_pca_panel_size": gwas_pca_panel_size,
         "gwas_pca_panel_seed": gwas_pca_panel_seed,
         "gwas_pca_algorithm_version": gwas_pca_algorithm_version,
+        "screen_condition_k": screen_condition_k,
     }, sort_keys=True, separators=(",", ":")).encode())
 
     # 筛选方法标识（多元 vs 逐表型并集）
@@ -504,6 +509,164 @@ def gwas_screen(
     return idx, min_p
 
 
+def sparse_multitask_refine(
+    snp_train: np.ndarray,
+    pheno_train: np.ndarray,
+    candidate_indices: np.ndarray,
+    *,
+    final_k: int,
+    verbose: bool = True,
+    logger=None,
+) -> np.ndarray:
+    """以固定多任务 Elastic Net 在候选内保留 20 个 SNP。
+
+    固定正则化避免每个重复都进行大规模交叉验证，使模拟实验的筛选协议
+    保持唯一且运行时间可控。
+    """
+    dosage = validate_dosage(snp_train).astype(np.float64)
+    candidates = np.asarray(candidate_indices, dtype=np.int64)
+    if (
+        candidates.ndim != 1
+        or not candidates.size
+        or np.unique(candidates).size != candidates.size
+        or (candidates < 0).any()
+        or (candidates >= dosage.shape[1]).any()
+    ):
+        raise ValueError("稀疏精筛候选必须是有效、互异的原始SNP索引")
+    if final_k < 1:
+        raise ValueError("稀疏精筛 final_k 必须为正整数")
+
+    candidate_dosage = dosage[:, candidates]
+    features = np.concatenate(
+        [candidate_dosage, (candidate_dosage == 1).astype(np.float64)], axis=1
+    )
+    target = np.asarray(pheno_train, dtype=np.float64).reshape(len(dosage), -1)
+    if not np.isfinite(target).all():
+        raise ValueError("稀疏精筛表型必须为有限值")
+
+    # 仅在训练集拟合。alpha=0.03、l1_ratio=0.80 在标准化后的加性/显性
+    # 特征上提供稳定稀疏性，且不引入额外的交叉验证分支。
+    alpha = 0.03
+    l1_ratio = 0.80
+    feature_scaler = StandardScaler().fit(features)
+    y_mean = target.mean(axis=0, keepdims=True)
+    y_scale = target.std(axis=0, ddof=0, keepdims=True)
+    y_scale = np.where(y_scale > 1e-12, y_scale, 1.0)
+    estimator = MultiTaskElasticNet(
+        alpha=alpha,
+        l1_ratio=l1_ratio,
+        max_iter=3000,
+        tol=1e-3,
+        selection="cyclic",
+        random_state=73,
+    ).fit(feature_scaler.transform(features), (target - y_mean) / y_scale)
+
+    count = len(candidates)
+    coefficient = estimator.coef_
+    group_score = np.sqrt(
+        np.sum(coefficient[:, :count] ** 2 + coefficient[:, count:] ** 2, axis=0)
+    )
+    keep = min(final_k, count)
+    local = np.argsort(-group_score, kind="stable")[:keep]
+    selected = np.sort(candidates[local])
+    if verbose:
+        _log(
+            logger,
+            f"稀疏联合精筛: candidates={count}, final={keep}, "
+            f"alpha={alpha:.6g}, l1_ratio={l1_ratio:.2f}, "
+            f"nonzero_groups={np.count_nonzero(group_score):d}",
+        )
+    return selected
+
+
+def conditional_residual_union_screen(
+    snp_train: np.ndarray,
+    pheno_train: np.ndarray,
+    *,
+    gwas_k: int,
+    screen_k: int,
+    condition_k: int = 15,
+    n_pcs: int = 5,
+    multivariate: bool = True,
+    verbose: bool = True,
+    logger=None,
+) -> np.ndarray:
+    """边际GWAS/DC-SIS后对条件残差再筛一次，以解除强位点掩盖。"""
+    dosage = validate_dosage(snp_train)
+    n_samples, n_snps = dosage.shape
+    if min(gwas_k, screen_k, condition_k) < 1:
+        raise ValueError("条件筛选的 gwas_k、screen_k、condition_k 必须为正整数")
+    if n_samples <= 2 * condition_k + 2:
+        raise ValueError("训练样本不足以拟合条件位点的加性和显性效应")
+
+    def marginal_scores(target: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        _, gwas_p = gwas_screen(
+            dosage,
+            target,
+            k=n_snps,
+            n_pcs=n_pcs,
+            multivariate=multivariate,
+            verbose=False,
+            logger=logger,
+        )
+        dc_target = (
+            _multivariate_pheno_matrix(target)
+            if multivariate
+            else target[:, 0, :]
+        )
+        _, dc_score = dc_sis_screen(
+            dosage,
+            dc_target,
+            k=n_snps,
+            verbose=False,
+            logger=logger,
+        )
+        return gwas_p, dc_score
+
+    first_gwas, first_dc = marginal_scores(pheno_train)
+    rank_gwas = np.empty(n_snps, dtype=np.int64)
+    rank_gwas[np.argsort(first_gwas, kind="stable")] = np.arange(n_snps)
+    rank_dc = np.empty(n_snps, dtype=np.int64)
+    rank_dc[np.argsort(-first_dc, kind="stable")] = np.arange(n_snps)
+    conditioning = np.argsort(np.minimum(rank_gwas, rank_dc), kind="stable")[
+        :min(condition_k, n_snps)
+    ]
+
+    condition_dosage = dosage[:, conditioning].astype(np.float64)
+    condition_design = np.concatenate(
+        [
+            np.ones((n_samples, 1), dtype=np.float64),
+            condition_dosage,
+            (condition_dosage == 1).astype(np.float64),
+        ],
+        axis=1,
+    )
+    flat_pheno = pheno_train.reshape(n_samples, -1)
+    coefficients, _, _, _ = np.linalg.lstsq(condition_design, flat_pheno, rcond=None)
+    residual_pheno = (flat_pheno - condition_design @ coefficients).reshape(
+        pheno_train.shape
+    )
+    residual_gwas, residual_dc = marginal_scores(residual_pheno)
+
+    first_candidates = set(np.argsort(first_gwas, kind="stable")[:gwas_k].tolist())
+    first_candidates.update(np.argsort(-first_dc, kind="stable")[:screen_k].tolist())
+    residual_candidates = set(
+        np.argsort(residual_gwas, kind="stable")[:gwas_k].tolist()
+    )
+    residual_candidates.update(
+        np.argsort(-residual_dc, kind="stable")[:screen_k].tolist()
+    )
+    selected = np.array(sorted(first_candidates | residual_candidates), dtype=np.int64)
+    if verbose:
+        _log(
+            logger,
+            f"条件残差筛选: 第一轮={len(first_candidates)}, "
+            f"条件位点={len(conditioning)}, 新增={len(residual_candidates - first_candidates)}, "
+            f"最终={len(selected)} SNPs",
+        )
+    return selected
+
+
 def gwas_dc_sis_screen_mmap(
     snp_file: str | Path,
     train_indices: np.ndarray,
@@ -673,6 +836,7 @@ def screen_snps(
     verbose: bool = True,
     logger=None,
     n_pcs: int = 5,
+    condition_k: int = 15,
 ) -> np.ndarray | None:
     """统一 SNP 筛选入口：多表型 + 两阶段串联 + 磁盘缓存。
 
@@ -735,6 +899,29 @@ def screen_snps(
         _log(logger, f"  gwas_k:     {gwas_k}")
         _log(logger, f"  筛选模式: {'多元联合 (GWAS+DC-SIS)' if multivariate else '逐表型并集'}")
         _log(logger, "=" * 60)
+
+    screened_idx = conditional_residual_union_screen(
+        snp_train,
+        pheno_train,
+        gwas_k=gwas_k,
+        screen_k=screen_k,
+        condition_k=condition_k,
+        n_pcs=n_pcs,
+        multivariate=multivariate,
+        verbose=verbose,
+        logger=logger,
+    )
+    screened_idx = sparse_multitask_refine(
+        snp_train,
+        pheno_train,
+        screened_idx,
+        final_k=20,
+        verbose=verbose,
+        logger=logger,
+    )
+    if cache_key is not None:
+        _save_cache(cache_key, cache_dir, screened_idx, logger=logger)
+    return screened_idx
 
     # ---- 两阶段串联 ----
     # 阶段 1: GWAS 在全 P 维向量化粗筛（快，几分钟内完成 2M）
@@ -851,6 +1038,18 @@ def screen_snps(
     if screened_idx is None:
         return None  # k >= 原始维度时保持全列，不尝试把 None 转成索引。
     screened_idx = np.sort(np.asarray(screened_idx)).astype(np.int64)
+    if method == "legacy_sparse_refine":
+        if final_k is None:
+            raise ValueError("legacy_sparse_refine 必须显式设置 final_k")
+        screened_idx = sparse_multitask_refine(
+            snp_train,
+            pheno_train,
+            screened_idx,
+            final_k=final_k,
+            seed=73,
+            verbose=verbose,
+            logger=logger,
+        )
 
     if verbose:
         _log(logger, f"筛选完成: {P} -> {len(screened_idx)} SNPs")

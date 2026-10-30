@@ -55,9 +55,8 @@ ENV/
 
 # 其它
 data/
-docs/*
-!docs/EXPERIMENT_READINESS.md
-!docs/SIMULATION_DEBUG_WORKFLOW.md
+docs/
+.codex/
 .opencode/
 .workbuddy/
 .qoder/
@@ -70,15 +69,9 @@ dataset
 outputs
 splits/
 AGENTS.md
-**Baseline*
-**_Train.py
-!Baseline_Train.py
-!trainer/Baseline_Trainer.py
-docs/
 environment/
 examples/
 schemas/
 test/
 plot_*
-run_*
-train_*
+tests/

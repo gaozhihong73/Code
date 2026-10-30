@@ -1,0 +1,3 @@
+.venv/bin/python -B experiments/simulation/train_experiment1_oracle.py --workers 2 --devices cuda:0
+
+.venv/bin/python -B experiments/simulation/train_experiment2_screened.py --workers 2 --devices cuda:0

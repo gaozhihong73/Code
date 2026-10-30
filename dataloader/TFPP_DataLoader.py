@@ -1,6 +1,6 @@
 """TFPP 模型的数据加载与预处理模块。
 
-本模块负责 TFPP 训练/推理所需的数据管线：从 .npy 加载 SNP 基因型、从 CSV 加载多维时序表型、
+本模块负责 TFPP 训练/推理所需的数据管线：从 .npy/.csv 加载 SNP 基因型、从 CSV 加载多维时序表型、
 执行表型归一化（仅用训练集拟合 scaler，防止数据泄露）、按比例或 KFold 索引划分数据集，
 最终构建 PyTorch DataLoader。
 """
@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from utils import NORM_FUNC_REGISTRY, SCALER_REGISTRY
-from utils.Genotype import dosage_to_model_codes
+from utils.Genotype import dosage_to_model_codes, load_dosage_file
 from utils.Split import (
     IndividualSplit,
     validate_individual_split,
@@ -180,14 +180,14 @@ def _build_dataloaders_and_scalers(
 class TFPPDataset:
     """TFPP 模型专用数据集，管理 SNP 基因型与多维时序表型的加载与索引。
 
-    从 ``.npy`` 文件加载 SNP 数据（+1 偏移将缺失值 -1 映射为 0），
+    从 ``.npy`` 或 ``.csv`` 文件加载 SNP 数据（+1 偏移将缺失值 -1 映射为 0），
     从 ``pheno_dir`` 目录中按表型名称逐个读取 CSV 文件并沿表型维度拼接，
     最终提供 ``(snp, phenotype)`` 样本对供 DataLoader 使用。
 
     Parameters
     ----------
     snp_file : str
-        SNP 数据文件路径（``.npy`` 格式），加载后形状为 ``(n_sample, n_feature)``。
+        SNP 数据文件路径（``.npy`` 或 ``.csv`` 格式）。
     pheno_dir : str
         表型 CSV 文件存放目录，每个表型对应一个 ``{name}.csv`` 文件，
         文件形状为 ``(n_sample, n_time_points)``。
@@ -210,7 +210,7 @@ class TFPPDataset:
         Parameters
         ----------
         snp_file : str
-            SNP 数据文件路径（``.npy`` 格式）。
+            SNP 数据文件路径（``.npy`` 或 ``.csv`` 格式）。
         pheno_dir : str
             表型 CSV 文件存放目录。
         phenotype_names : list[str]
@@ -224,30 +224,30 @@ class TFPPDataset:
         if not Path(snp_file).exists():
             raise FileNotFoundError(f"SNP文件不存在: {snp_file}")
 
-        # pretest 只从只读 mmap 提取最终列；不会复制完整高维 SNP 矩阵。
-        raw = np.load(
-            snp_file,
-            mmap_mode="r" if snp_indices is not None else None,
-            allow_pickle=False,
-        )
-        self.original_snp_dim = int(raw.shape[1])
         self.snp_column_indices = (
             None if snp_indices is None else np.asarray(snp_indices, dtype=np.int64)
         )
-        selected = (
-            raw if self.snp_column_indices is None else raw[:, self.snp_column_indices]
+        selected, csv_sample_ids, self.original_snp_dim = load_dosage_file(
+            snp_file, column_indices=self.snp_column_indices
         )
         # self.snp 明确为模型类别码；筛选调用方必须显式解码为剂量。
         self.snp = dosage_to_model_codes(selected)
-        if sample_ids is None:
+        if sample_ids is None and csv_sample_ids is not None:
+            self.sample_ids = csv_sample_ids
+            self.sample_id_source = "snp_csv"
+        elif sample_ids is None:
             self.sample_ids = np.arange(len(self.snp), dtype=np.int64)
             self.sample_id_source = "row_index"
         else:
-            self.sample_ids = np.asarray(list(sample_ids))
+            self.sample_ids = np.asarray(list(sample_ids)).astype(str)
             if len(self.sample_ids) != len(self.snp) or len(
                 set(self.sample_ids.tolist())
             ) != len(self.snp):
                 raise ValueError("sample_ids 必须与 SNP 行数一致且唯一")
+            if csv_sample_ids is not None and not np.array_equal(
+                self.sample_ids, csv_sample_ids
+            ):
+                raise ValueError("SNP CSV 的 SampleID 与 sample_ids_file 不一致")
             self.sample_id_source = "provided"
 
         self.pheno_dir = pheno_dir
@@ -287,19 +287,36 @@ class TFPPDataset:
             path = Path(f"{self.pheno_dir}/{phenotype_name}.csv")
             if self.phenotype_row_indices is None:
                 frame = pd.read_csv(path)
+                phenotype_ids = None
+                if len(frame.columns) and frame.columns[0] == "SampleID":
+                    phenotype_ids = frame.pop("SampleID").astype(str).to_numpy()
                 labels = list(frame.columns)
                 phenotype_values = frame.to_numpy(dtype=np.float32)
                 parsed_rows = np.arange(len(frame), dtype=np.int64)
+                if phenotype_ids is not None and not np.array_equal(
+                    self.sample_ids.astype(str), phenotype_ids
+                ):
+                    raise ValueError(
+                        f"{phenotype_name}.csv 的 SampleID 与 SNP/样本清单不一致"
+                    )
             else:
                 wanted = set(self.phenotype_row_indices.tolist())
                 values = {}
                 with path.open("r", encoding="utf-8-sig", newline="") as handle:
                     labels = next(csv.reader([handle.readline()]))
+                    has_sample_id = bool(labels and labels[0] == "SampleID")
+                    if has_sample_id:
+                        labels = labels[1:]
                     for row_idx, line in enumerate(handle):
                         if row_idx in wanted:
-                            values[row_idx] = [
-                                float(value) for value in next(csv.reader([line]))
-                            ]
+                            row = next(csv.reader([line]))
+                            if has_sample_id:
+                                if str(self.sample_ids[row_idx]) != row[0]:
+                                    raise ValueError(
+                                        f"{phenotype_name}.csv 第{row_idx + 2}行 SampleID 不一致"
+                                    )
+                                row = row[1:]
+                            values[row_idx] = [float(value) for value in row]
                 if set(values) != wanted:
                     raise ValueError(f"{phenotype_name}.csv 缺少 train/val 行")
                 phenotype_values = np.full(

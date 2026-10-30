@@ -1,11 +1,8 @@
-"""DynaGS: TFPP 模型训练入口 (真实数据)。
-
-所有命令行参数的默认值均与 config/TFPP_Config.py 保持一致。
-"""
+"""DynaGS: TFPP 真实数据训练入口，超参数由 JSON 配置文件统一管理。"""
 
 import argparse
 
-from config import TFPPConfig
+from config import TFPPConfig, build_tfpp_config
 from trainer import TFPPTrainer
 
 
@@ -16,7 +13,7 @@ def _str_to_bool(s: str) -> bool:
     return s.strip().lower() == "true"
 
 
-def parse_args():
+def _legacy_parse_args():
     """解析命令行参数并返回 argparse Namespace 对象。"""
     parser = argparse.ArgumentParser(
         description="DynaGS: TFPP 模型训练入口",
@@ -31,10 +28,18 @@ def parse_args():
         help="实验名称，用于标识本次训练。若不指定则自动按时间戳生成 (格式: exp_YYYYMMDD_HHMMSS)",
     )
     parser.add_argument(
+        "--output_root",
+        default=TFPPConfig.model_fields["output_root"].default,
+        help="训练输出根目录",
+    )
+    parser.add_argument(
         "--snp_file",
         type=str,
         default="dataset/maize/snp/snp_50000.npy",
-        help="SNP 基因型数据文件路径 (.npy 格式, 形状为 [样本数, SNP数], 编码值 0/1/2)",
+        help=(
+            "SNP 基因型数据文件路径（.npy 或 .csv，形状为 [样本数, SNP数]，"
+            "编码值0/1/2；CSV第一列必须为SampleID）"
+        ),
     )
     parser.add_argument(
         "--pheno_dir",
@@ -202,6 +207,12 @@ def parse_args():
             "普通入口按生产筛选策略：P>50000串联，否则两者并集；严格串联请用统一 runner。"
             "0=跳过此步骤"
         ),
+    )
+    parser.add_argument(
+        "--screen_condition_k",
+        type=int,
+        default=TFPPConfig.model_fields["screen_condition_k"].default,
+        help="条件残差筛选中用于拟合并去除的强关联SNP数",
     )
     parser.add_argument(
         "--screen_multivariate",
@@ -372,58 +383,26 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    """TFPP 模型训练入口：解析参数、构建配置、初始化训练器并执行训练。"""
-    args = parse_args()
+def parse_args():
+    """只接收配置文件及实验输出相关参数。"""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        default="config/profiles/real_data.json",
+        help="真实数据实验 JSON 配置文件",
+    )
+    parser.add_argument("--exp_name", default=None, help="可选的本次实验输出名称")
+    parser.add_argument("--output_root", default=None, help="可选的本次输出根目录")
+    return parser.parse_args()
 
-    config = TFPPConfig(
+
+def main():
+    """从 JSON 配置构建模型配置并启动训练。"""
+    args = parse_args()
+    config = build_tfpp_config(
+        args.config,
         exp_name=args.exp_name,
-        snp_file=args.snp_file,
-        pheno_dir=args.pheno_dir,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        split_file=args.split_file,
-        sample_ids_file=args.sample_ids_file,
-        phenotype_names=args.pheno_names,
-        time_coordinates=args.time_coordinates,
-        norm_method=args.norm_method,
-        scaler_type=args.scaler_type,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        min_lr=args.min_lr,
-        weight_decay=args.weight_decay,
-        dropout=args.dropout,
-        grad_clip_norm=args.grad_clip_norm,
-        patience=args.patience,
-        seed=args.seed,
-        is_save_training_info=args.is_save,
-        num_workers=args.num_workers,
-        screen_k=args.screen_k,
-        gwas_k=args.gwas_k,
-        screen_multivariate=args.screen_multivariate,
-        screen_missing_strategy=args.screen_missing_strategy,
-        wide_missing_strategy=args.wide_missing_strategy,
-        screen_cache_dir=args.screen_cache_dir,
-        loss_type=args.loss_type,
-        pcc_weight=args.pcc_weight,
-        offset_weight=args.offset_weight,
-        l1_wide_weight=args.l1_wide_weight,
-        use_warmup=args.use_warmup,
-        warmup_epochs=args.warmup_epochs,
-        warmup_start_factor=args.warmup_start_factor,
-        warmup_end_factor=args.warmup_end_factor,
-        d_model=args.d_model,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers,
-        d_ff=args.d_ff,
-        num_embeddings=args.num_embeddings,
-        degree=args.degree,
-        ablation_mode=args.ablation_mode,
-        use_kfold=args.use_kfold,
-        n_folds=args.n_folds,
-        kfold_val_ratio=args.kfold_val_ratio,
+        output_root=args.output_root,
     )
 
     TFPPTrainer(config=config).train()

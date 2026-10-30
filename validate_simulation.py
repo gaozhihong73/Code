@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 from dataloader import TFPPDataset, get_dataloader
@@ -22,9 +23,11 @@ def validate_tfpp_loading(data_dir: str | Path, *, batch_size: int = 16) -> dict
     split_path = data_dir / "splits" / f"split_seed{manifest['split']['seed']}.npz"
     split = load_split(split_path, sample_ids=sample_ids)
     validate_individual_split(split, sample_ids=sample_ids)
+    snp_name = manifest["model_inputs"][0]
+    snp_path = data_dir / snp_name
     dataset = TFPPDataset(
-        str(data_dir / "genotype.npy"),
-        str(data_dir / "cleaned_pheno"),
+        str(snp_path),
+        str(data_dir),
         ["sim_pheno"],
         sample_ids=sample_ids,
     )
@@ -39,7 +42,10 @@ def validate_tfpp_loading(data_dir: str | Path, *, batch_size: int = 16) -> dict
     )
     train_loader, val_loader, test_loader, scalers = loaders
     batches = [next(iter(loader)) for loader in loaders[:3]]
-    raw = np.load(data_dir / "genotype.npy", allow_pickle=False)
+    if snp_path.suffix == ".npy":
+        raw = np.load(snp_path, allow_pickle=False)
+    else:
+        raw = pd.read_csv(snp_path).drop(columns="SampleID").to_numpy()
     index_sets = [set(x.tolist()) for x in (split.train_idx, split.val_idx, split.test_idx)]
     finite = all(torch.isfinite(item).all().item() for batch in batches for item in batch)
     scaler = scalers["pheno_meta"]["scalers"]["sim_pheno"]

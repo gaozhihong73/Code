@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 
 from config import TFPPConfig
-from utils.Genotype import dosage_to_model_codes, model_code_tensor
+from utils.Genotype import dosage_to_model_codes, load_dosage_file, model_code_tensor
 from utils.Inference import file_sha256, prepare_inference_input, transform_phenotypes
 from utils.Normalization import denormalize_phenotype, load_scalers
 from utils.model_loader import load_tfpp_model
@@ -26,7 +26,7 @@ def parse_args(argv=None):
     """输入阶段必须由用户声明；预处理配置从实验目录读取。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model_path", required=True, help="实验目录或 models/*.pt")
-    parser.add_argument("--input_snp", help="外部原始剂量 .npy，缺失为 -1/NaN")
+    parser.add_argument("--input_snp", help="外部原始剂量 .npy/.csv，缺失为 -1/NaN")
     parser.add_argument("--input_stage", choices=["raw", "screened"],
                         help="外部输入必填：raw 为原始全维，screened 为训练索引顺序的已筛选列")
     parser.add_argument("--snp_file", default="dataset/maize/snp/snp_50000.npy",
@@ -55,7 +55,7 @@ def parse_args(argv=None):
 
 def prepare_test_data(snp_file, artifacts, pheno_dir=None):
     """按保存的 test_idx 取行；标签读取和 transform 不影响预测输入。"""
-    raw = np.load(snp_file, allow_pickle=False)
+    raw, _, _ = load_dosage_file(snp_file)
     if raw.ndim != 2 or raw.shape[0] != artifacts.split.metadata["n_samples"]:
         raise ValueError("原始 SNP 个体数与保存的 split 不一致；需保持训练时行顺序")
     # 回放验证训练行未被替换；test SNP 可显式改变，绝不用于重新拟合。
@@ -74,6 +74,8 @@ def prepare_test_data(snp_file, artifacts, pheno_dir=None):
         blocks = []
         for name in names:
             frame = pd.read_csv(Path(pheno_dir) / f"{name}.csv")
+            if len(frame.columns) and frame.columns[0] == "SampleID":
+                frame = frame.drop(columns="SampleID")
             if artifacts.metadata.get("time_labels") is not None and list(frame.columns) != artifacts.metadata["time_labels"]:
                 raise ValueError("测试 phenotype 时间列或顺序与训练记录不一致")
             if frame.shape != (len(raw), times):
@@ -99,7 +101,7 @@ def predict(argv=None):
         scalers = load_scalers(args.scaler_path or path)
         if scalers.get("phenotype_names") != info["phenotype_names"]:
             raise ValueError("legacy scaler 表型顺序与模型不一致")
-        raw = np.load(args.input_snp, allow_pickle=False)
+        raw, _, _ = load_dosage_file(args.input_snp)
         if raw.ndim != 2 or raw.shape[1] != info["snp_dim"]:
             raise ValueError("legacy screened 输入维度与模型不一致")
         codes = model_code_tensor(dosage_to_model_codes(raw))
@@ -111,7 +113,9 @@ def predict(argv=None):
         print(f"[*] 复用训练筛选配置: screen_multivariate={artifacts.config['screen_multivariate']}")
         if args.input_snp:
             codes = prepare_inference_input(
-                np.load(args.input_snp, allow_pickle=False), artifacts, input_stage=args.input_stage
+                load_dosage_file(args.input_snp)[0],
+                artifacts,
+                input_stage=args.input_stage,
             )
             sample_idx = np.arange(len(codes))
         else:

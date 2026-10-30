@@ -21,6 +21,7 @@ from utils.Split import load_split
 
 
 SCENARIO_LABEL = "动态非线性遗传场景"
+ORACLE_SCENARIO_LABEL = "动态非线性遗传场景（Oracle 20 QTL）"
 REPORT_COLUMNS = (
     "model",
     "PCC ↑",
@@ -48,20 +49,26 @@ class BaselineConfig:
     seed: int = 73
     scenario_label: str = SCENARIO_LABEL
     alphas: tuple[float, ...] = field(
-        default_factory=lambda: tuple(np.logspace(-3, 6, 13).tolist())
+        default_factory=lambda: tuple(np.logspace(0, 0, num=1).tolist())
     )
     models: tuple[str, ...] = SUPPORTED_MODELS
-    rf_n_estimators: int = 500
+    rf_n_estimators: int = 200
     rf_max_features: float | str = 0.1
-    rf_min_samples_leaf: int = 2
+    rf_min_samples_leaf: int = 1
     rf_n_jobs: int = -1
-    xgb_n_estimators: int = 500
-    xgb_learning_rate: float = 0.05
-    xgb_max_depth: int = 6
-    xgb_subsample: float = 0.8
-    xgb_colsample_bytree: float = 0.2
-    xgb_early_stopping_rounds: int = 30
+    xgb_n_estimators: int = 200
+    xgb_learning_rate: float = 0.005
+    xgb_max_depth: int = 4
+    xgb_subsample: float = 0.5
+    xgb_colsample_bytree: float = 0.3
+    xgb_early_stopping_rounds: int = 10
     xgb_n_jobs: int = -1
+    xgb_device: str = "cuda"
+    genotype_file: str | None = None
+    phenotype_file: str | None = None
+    sample_ids_file: str | None = None
+    split_file: str | None = None
+    preselected_snp_indices: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         unknown = sorted(set(self.models).difference(SUPPORTED_MODELS))
@@ -69,10 +76,16 @@ class BaselineConfig:
             raise ValueError(f"不支持的模型: {unknown}; 可选模型: {SUPPORTED_MODELS}")
         if len(self.models) != len(set(self.models)):
             raise ValueError("models 不得包含重复项")
-        if self.scenario_label != SCENARIO_LABEL:
-            raise ValueError(f"该实验场景必须明确命名为“{SCENARIO_LABEL}”")
+        if self.scenario_label not in (SCENARIO_LABEL, ORACLE_SCENARIO_LABEL):
+            raise ValueError("不支持的比较实验场景标签")
         if not self.alphas or any(value <= 0 for value in self.alphas):
             raise ValueError("alphas 必须包含正数")
+        is_cuda_device = self.xgb_device == "cuda" or (
+            self.xgb_device.startswith("cuda:")
+            and self.xgb_device.removeprefix("cuda:").isdigit()
+        )
+        if self.xgb_device != "cpu" and not is_cuda_device:
+            raise ValueError("xgb_device 仅支持 'cpu'、'cuda' 或 'cuda:<设备编号>'")
 
 
 def _sha256(path: Path) -> str:
@@ -90,11 +103,15 @@ class BaselineTrainer:
         self.config = config
         self.data_dir = Path(config.data_dir).resolve()
         self.output_dir = Path(config.output_dir).resolve()
-        self.genotype_path = self.data_dir / "genotype.npy"
-        self.phenotype_path = self.data_dir / "cleaned_pheno/sim_pheno.csv"
-        self.sample_ids_path = self.data_dir / "sample_ids.csv"
+        self.genotype_path = Path(config.genotype_file or self.data_dir / "genotype.npy")
+        self.phenotype_path = Path(
+            config.phenotype_file or self.data_dir / "cleaned_pheno/sim_pheno.csv"
+        )
+        self.sample_ids_path = Path(config.sample_ids_file or self.data_dir / "sample_ids.csv")
         self.manifest_path = self.data_dir / "data_manifest.json"
-        self.split_path = self.data_dir / "splits" / f"split_seed{config.seed}.npz"
+        self.split_path = Path(
+            config.split_file or self.data_dir / "splits" / f"split_seed{config.seed}.npz"
+        )
 
         required = (
             self.manifest_path,
@@ -117,18 +134,38 @@ class BaselineTrainer:
         if self.split.metadata["seed"] != config.seed:
             raise ValueError("固定 split 中的 seed 与配置不一致")
 
-        self.genotype = np.load(self.genotype_path, mmap_mode="r", allow_pickle=False)
-        self.phenotype = pd.read_csv(self.phenotype_path).to_numpy(dtype=np.float32)
-        if self.genotype.ndim != 2 or self.phenotype.ndim != 2:
+        genotype = np.load(self.genotype_path, mmap_mode="r", allow_pickle=False)
+        phenotype_frame = pd.read_csv(self.phenotype_path)
+        if "SampleID" in phenotype_frame.columns:
+            phenotype_ids = phenotype_frame.pop("SampleID").astype(str).tolist()
+            if phenotype_ids != self.sample_ids:
+                raise ValueError("表型文件的 SampleID 顺序与 sample_ids.csv 不一致")
+        self.phenotype = phenotype_frame.to_numpy(dtype=np.float32)
+        if genotype.ndim != 2 or self.phenotype.ndim != 2:
             raise ValueError("基因型和表型必须均为二维矩阵")
-        if self.genotype.shape[0] != len(self.sample_ids):
+        if genotype.shape[0] != len(self.sample_ids):
             raise ValueError("基因型行数与 SampleID 数量不一致")
         if self.phenotype.shape[0] != len(self.sample_ids):
             raise ValueError("表型行数与 SampleID 数量不一致")
-        if not np.isin(self.genotype, (0, 1, 2)).all():
+        if not np.isin(genotype, (0, 1, 2)).all():
             raise ValueError("基因型必须使用 0/1/2 剂量编码")
         if not np.isfinite(self.phenotype).all():
             raise ValueError("表型必须全部为有限值")
+
+        self.raw_snp_count = int(genotype.shape[1])
+        if config.preselected_snp_indices is None:
+            self.genotype = genotype
+        else:
+            indices = np.asarray(config.preselected_snp_indices, dtype=np.int64)
+            if (
+                indices.ndim != 1
+                or not len(indices)
+                or len(np.unique(indices)) != len(indices)
+                or (indices < 0).any()
+                or (indices >= self.raw_snp_count).any()
+            ):
+                raise ValueError("预选 SNP 索引必须为互异且有效的原始列索引")
+            self.genotype = genotype[:, np.sort(indices)]
 
         train = self.phenotype[self.split.train_idx, None, :]
         val = self.phenotype[self.split.val_idx, None, :]
@@ -292,10 +329,15 @@ class BaselineTrainer:
             raise ImportError("运行 XGBoost 前请先执行 `uv sync`") from error
 
         x_train, x_val, x_test = self._dosage_splits()
+        multi_strategy = (
+            "one_output_per_tree"
+            if self.config.xgb_device.startswith("cuda")
+            else "multi_output_tree"
+        )
         model = XGBRegressor(
             objective="reg:squarederror",
             tree_method="hist",
-            multi_strategy="multi_output_tree",
+            multi_strategy=multi_strategy,
             n_estimators=self.config.xgb_n_estimators,
             learning_rate=self.config.xgb_learning_rate,
             max_depth=self.config.xgb_max_depth,
@@ -304,6 +346,7 @@ class BaselineTrainer:
             early_stopping_rounds=self.config.xgb_early_stopping_rounds,
             random_state=self.config.seed,
             n_jobs=self.config.xgb_n_jobs,
+            device=self.config.xgb_device,
         )
         model.fit(
             x_train,
@@ -326,7 +369,8 @@ class BaselineTrainer:
             "max_depth": self.config.xgb_max_depth,
             "subsample": self.config.xgb_subsample,
             "colsample_bytree": self.config.xgb_colsample_bytree,
-            "multi_strategy": "multi_output_tree",
+            "device": self.config.xgb_device,
+            "multi_strategy": multi_strategy,
         }
         return model.predict(x_test), parameters, validation, x_train.shape[1]
 
@@ -390,7 +434,8 @@ class BaselineTrainer:
             details = {
                 "scenario": self.config.scenario_label,
                 "model": name,
-                "raw_snp_count": int(self.genotype.shape[1]),
+                "raw_snp_count": self.raw_snp_count,
+                "model_input_snp_count": int(self.genotype.shape[1]),
                 "effective_feature_count": feature_count,
                 "selected_parameters": selected,
                 "test_metrics": metrics,
@@ -414,8 +459,8 @@ class BaselineTrainer:
                 }
             )
             print(
-                f"{name}: PCC={metrics['pcc']:.6f}, R²={metrics['r2']:.6f}, "
-                f"Runtime={runtime_seconds:.2f}s"
+                f"{name}: PCC={metrics['pcc']:.3f}, R²={metrics['r2']:.3f}, "
+                f"Runtime={runtime_seconds:.3f}s"
             )
 
         summary = pd.DataFrame(rows, columns=REPORT_COLUMNS)
@@ -438,7 +483,9 @@ class BaselineTrainer:
                 "test": len(self.split.test_idx),
             },
             "raw_snp_policy": (
-                "除不使用 SNP 的 Train-Mean 外，所有模型直接读取全部原始 SNP；"
+                "Oracle 模式只使用真值 QTL 输入；普通模式除 Train-Mean 外使用全部原始 SNP。"
+                if self.config.preselected_snp_indices is not None
+                else "除不使用 SNP 的 Train-Mean 外，所有模型直接读取全部原始 SNP；"
                 "不读取或使用任何预筛选 SNP 索引。树模型内部的随机列采样属于模型训练。"
             ),
             "fit_scope": "preprocessing=train; tuning_or_early_stop=val; test=evaluate_once",

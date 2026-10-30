@@ -1,12 +1,50 @@
 """集中定义基因型语义：筛选剂量 0/1/2，模型类别 0=缺失、1/2/3=剂量0/1/2。"""
 
 from typing import Literal
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 
 GENOTYPE_ENCODING_VERSION = "dosage012_missing-1_categorical0123_v1"
 MissingStrategy = Literal["error", "mode"]
+
+
+def load_dosage_file(
+    path: str | Path, *, column_indices: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray | None, int]:
+    """读取 .npy 或首列为 SampleID 的 .csv 剂量矩阵。"""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"SNP文件不存在: {path}")
+    sample_ids = None
+    if path.suffix.lower() == ".npy":
+        raw = np.load(
+            path,
+            mmap_mode="r" if column_indices is not None else None,
+            allow_pickle=False,
+        )
+    elif path.suffix.lower() == ".csv":
+        frame = pd.read_csv(path)
+        if not len(frame.columns) or frame.columns[0] != "SampleID":
+            raise ValueError("SNP CSV 第一列必须为 SampleID")
+        sample_ids = frame.pop("SampleID").astype(str).to_numpy()
+        if len(sample_ids) != len(set(sample_ids.tolist())):
+            raise ValueError("SNP CSV 的 SampleID 必须唯一")
+        if frame.shape[1] == 0:
+            raise ValueError("SNP CSV 不含位点列")
+        try:
+            raw = frame.to_numpy(dtype=np.float32)
+        except (TypeError, ValueError) as error:
+            raise ValueError("SNP CSV 除 SampleID 外必须全部为数值") from error
+    else:
+        raise ValueError("SNP 文件仅支持 .npy 或 .csv")
+    if raw.ndim != 2 or raw.shape[1] == 0:
+        raise ValueError("SNP 必须是非空二维矩阵")
+    original_snp_dim = int(raw.shape[1])
+    selected = raw if column_indices is None else raw[:, column_indices]
+    return selected, sample_ids, original_snp_dim
 
 
 def validate_dosage(data: np.ndarray, *, allow_missing: bool = False) -> np.ndarray:

@@ -182,6 +182,12 @@ class TFPPConfig(BaseModel):
     )
     gwas_population_structure: Literal["pca"] = "pca"
     gwas_n_pcs: int = Field(default=5, ge=1)
+    screen_condition_k: int = Field(
+        default=15,
+        ge=1,
+        description="条件残差筛选第一轮用于回归消除的强关联SNP数",
+    )
+
     gwas_pca_panel_size: int | None = Field(
         default=None,
         ge=1,
@@ -224,7 +230,7 @@ class TFPPConfig(BaseModel):
         description="mse=纯MSE, mse_pcc=MSE+PCC, mse_offset=MSE+个体偏移MSE",
     )
     offset_weight: float = 0.5
-    pcc_weight: float = 0.2
+    pcc_weight: float = 0.1
 
     # L1 稀疏正则化 (宽通路)
     l1_wide_weight: float = 1e-5  # L1 惩罚系数, 0=关闭
