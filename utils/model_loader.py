@@ -306,7 +306,7 @@ def save_model_config(config, model_dir: str | Path) -> None:
 
     Parameters
     ----------
-    config : TFPPConfig or SimTFPPConfig
+    config : TFPPConfig
         训练配置对象。
     model_dir : str or Path
         模型输出根目录（如 ``outputs/tfpp/exp_name``）。

@@ -1,4 +1,4 @@
-"""在 Oracle 20-QTL 模拟输入上运行传统模型、RF 与 XGBoost。"""
+"""在 Oracle 20-QTL 模拟输入上运行传统模型、Random Forest 与 XGBoost。"""
 
 from __future__ import annotations
 

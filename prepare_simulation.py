@@ -25,8 +25,8 @@ GENERATOR_SCRIPTS = (
     "r/dyn_sim.R",
     "r/dyn_curve.R",
     "prepare_simulation.py",
-    "experiments/simulation/generate_dataset.py",
-    "experiments/simulation/generate_all_datasets.py",
+    "experiments/e1_e2/simulation/data/generate_dataset.py",
+    "experiments/e1_e2/simulation/data/generate_all_datasets.py",
 )
 
 

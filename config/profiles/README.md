@@ -11,7 +11,7 @@
 .venv/bin/python -B train.py --config config/profiles/real_data.json
 
 # 模拟数据
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --config config/profiles/simulation.json \
   --data_dir dataset/experiments/P5000_NTR400_H0.4/rep_01
 ```

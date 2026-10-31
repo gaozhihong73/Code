@@ -71,7 +71,13 @@ splits/
 AGENTS.md
 environment/
 examples/
-schemas/
 test/
 plot_*
 tests/
+
+# Keep versioned experiment implementations visible despite broad data/tests ignores.
+!experiments/e1_e2/simulation/data/
+!experiments/e1_e2/simulation/data/*.py
+!experiments/e3/
+!experiments/e3/tests/
+!experiments/e3/tests/*.py

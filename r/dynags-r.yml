@@ -1,0 +1,8 @@
+name: dynags-r
+channels:
+  - conda-forge
+dependencies:
+  - r-base=4.4
+  - r-mvtnorm
+  - r-jsonlite
+  - r-data.table

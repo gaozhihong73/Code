@@ -35,7 +35,7 @@ SUPPORTED_MODELS = (
     "Ridge-All",
     "Ridge-A+D",
     "GBLUP-All",
-    "RF",
+    "Random Forest",
     "XGBoost",
 )
 
@@ -399,7 +399,7 @@ class BaselineTrainer:
             return self._fit_ridge(name)
         if name == "GBLUP-All":
             return self._fit_gblup()
-        if name == "RF":
+        if name == "Random Forest":
             return self._fit_rf()
         if name == "XGBoost":
             return self._fit_xgboost()

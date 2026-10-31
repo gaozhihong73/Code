@@ -85,12 +85,12 @@ uv run python train.py --config config/profiles/real_data.json --exp_name maize_
 模拟数据批量入口默认遍历正式清单中的全部300套数据。只查看任务而不训练：
 
 ```bash
-uv run python experiments/simulation/train_experiment2_screened.py \
+uv run python experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --config config/profiles/simulation.json --plan-only
 ```
 
 通过`--condition`和`--rep`可限定单个任务；完整用法见
-`experiments/simulation/README.md`。
+`experiments/e1_e2/simulation/README.md`。
 
 配置文件字段与 `TFPPConfig` 一一对应，启动时会拒绝未知字段或不符合约束的值。
 

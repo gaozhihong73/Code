@@ -1,0 +1,9 @@
+E1 
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment1_oracle.py --workers 2 --devices cuda:0
+
+E2
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py --workers 2 --devices cuda:0
+
+E3
+bash experiments/e3/run_e3.sh pilot
+bash experiments/e3/run_e3.sh formal --confirm-formal

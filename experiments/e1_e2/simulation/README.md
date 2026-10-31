@@ -19,7 +19,7 @@
 ## 单数据集生成
 
 ```bash
-conda run -n dynags-r .venv/bin/python -B experiments/simulation/generate_dataset.py \
+conda run -n dynags-r .venv/bin/python -B experiments/e1_e2/simulation/data/generate_dataset.py \
   --output_root dataset/experiments \
   --n_train 400 \
   --n_snps 5000 \
@@ -38,12 +38,12 @@ conda run -n dynags-r .venv/bin/python -B experiments/simulation/generate_datase
 
 ```bash
 conda run -n dynags-r .venv/bin/python -B \
-  experiments/simulation/generate_all_datasets.py \
+  experiments/e1_e2/simulation/data/generate_all_datasets.py \
   --output_root dataset/experiments
 ```
 
 脚本按顺序生成300份数据，每份生成后立即校验文件哈希、参数、20个QTL、
-固定split、实现遗传力和TFPP加载流程，并持续更新
+固定split、实现遗传力和DynaGS加载流程，并持续更新
 `dataset_manifest.json` 与 `dataset_manifest.csv`。任务中断后可原命令续跑；
 已有目录必须完整通过复验才会跳过，不会覆盖或默默接受半成品。
 
@@ -53,7 +53,7 @@ conda run -n dynags-r .venv/bin/python -B \
 `P={5,000, 10,000}`、`NTR={100, 200, 400, 800, 1,600}`、
 `h²={0.1, 0.4, 0.8}`，每个条件 10 个独立重复。每一份数据成对运行 Oracle 20-QTL 与未知 QTL 筛选实验，并使用同一份固定个体划分。
 
-该设计用于评估样本量、特征维度和遗传力对预测与筛选的影响。Ridge-A+D 是该机制下的强基线；不预设 TFPP 必然优于所有基线模型。
+该设计用于评估样本量、特征维度和遗传力对预测与筛选的影响。Ridge-A+D 是该机制下的强基线；不预设 DynaGS 必然优于所有基线模型。
 
 ## 批量训练入口
 
@@ -67,17 +67,17 @@ conda run -n dynags-r .venv/bin/python -B \
 先只查看任务，不启动训练：
 
 ```bash
-.venv/bin/python -B experiments/simulation/train_experiment1_oracle.py --plan-only
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py --plan-only
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment1_oracle.py --plan-only
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py --plan-only
 ```
 
 单GPU分别启动整批任务：
 
 ```bash
-.venv/bin/python -B experiments/simulation/train_experiment1_oracle.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment1_oracle.py \
   --workers 1 --devices cuda:0
 
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --workers 1 --devices cuda:0
 ```
 
@@ -108,7 +108,7 @@ conda run -n dynags-r .venv/bin/python -B \
 Oracle实验复用同一份表型和固定划分，只把模型输入替换为真值文件中记录的20个QTL：
 
 ```bash
-.venv/bin/python -B experiments/simulation/train_experiment1_oracle.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment1_oracle.py \
   --condition P5000_NTR400_H0.4 --rep 1
 ```
 
@@ -124,14 +124,14 @@ Oracle 输入下的传统基线模型使用同一份数据、固定划分和 20 
   --data_dir dataset/experiments/P5000_NTR400_H0.4/rep_01
 ```
 
-该脚本比较 Ridge、GBLUP、RF 和 XGBoost；输出保存在 `outputs/baseline_comparison/oracle_qtl20/`。基线模型不共享 TFPP 的优化器超参数，但严格共享样本划分、表型归一化流程、测试集和 Oracle SNP 输入。
+该脚本比较 Ridge、GBLUP、Random Forest 和 XGBoost；输出保存在 `outputs/baseline_comparison/oracle_qtl20/`。基线模型不共享 DynaGS 的优化器超参数，但严格共享样本划分、表型归一化流程、测试集和 Oracle SNP 输入。
 
 ## 改进筛选协议
 
 未知QTL条件通过专用 runner 启用固定的条件残差筛选：
 
 ```bash
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --condition P5000_NTR400_H0.4 --rep 1
 ```
 
@@ -143,7 +143,7 @@ Oracle 输入下的传统基线模型使用同一份数据、固定划分和 20 
 
 ```bash
 PATH=/root/miniconda3/envs/dynags-r/bin:$PATH .venv/bin/python -B \
-  experiments/simulation/generate_dataset.py \
+  experiments/e1_e2/simulation/data/generate_dataset.py \
   --output_root dataset/experiments \
   --n_train 400 --n_snps 5000 --heritability 0.4 --rep 1 --seed 73 \
   --n_epistasis 10 --epistasis_strength 0.5

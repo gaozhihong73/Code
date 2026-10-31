@@ -1,13 +1,14 @@
-"""实验二：批量执行未知QTL筛选后TFPP训练。
+"""实验一：批量使用真实20-QTL训练TFPP。
 
 独立入口，不依赖仓库根目录的train_sim脚本。默认遍历正式清单中的全部
-300套数据；每项由独立子进程执行，输出与实验一完全隔离。
+300套数据；每项由独立子进程执行，可在多GPU上安全并行。
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import shutil
@@ -19,7 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+import numpy as np
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
@@ -28,10 +31,19 @@ from trainer.TFPP_Trainer import TFPPTrainer
 
 DEFAULT_DATA_ROOT = REPOSITORY_ROOT / "dataset/experiments"
 DEFAULT_CONFIG = REPOSITORY_ROOT / "config/profiles/simulation.json"
-DEFAULT_OUTPUT_ROOT = REPOSITORY_ROOT / "outputs/simulation/experiment2_screened"
+DEFAULT_OUTPUT_ROOT = REPOSITORY_ROOT / "outputs/simulation/experiment1_oracle"
+EXPECTED_QTL_COUNT = 20
 REDUNDANT_HISTORY = tuple(
     f"phenotype_{metric}_history.csv" for metric in ("mse", "rmse", "mae", "pcc", "r2")
 )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _atomic_json(path: Path, payload: Any) -> None:
@@ -65,22 +77,72 @@ def _snp_file(data_dir: Path, manifest: dict[str, Any]) -> Path:
     raise FileNotFoundError(f"未找到sim_snp.npy或sim_snp.csv: {data_dir}")
 
 
+def _true_qtl(data_dir: Path, snp_dim: int) -> tuple[np.ndarray, dict[str, int]]:
+    path = data_dir / "truth/causal_effects.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    required = {"snp_index", "snp_name", "effect_type"}
+    if len(rows) != EXPECTED_QTL_COUNT or not rows or not required.issubset(rows[0]):
+        raise ValueError(f"QTL真值必须包含规定字段和20行: {path}")
+    one_based = np.asarray([int(row["snp_index"]) for row in rows], dtype=np.int64)
+    if len(np.unique(one_based)) != 20 or (one_based < 1).any():
+        raise ValueError("QTL索引必须是20个互异正整数")
+    if any(row["snp_name"] != f"SNP{index}" for index, row in zip(one_based, rows)):
+        raise ValueError("snp_name与snp_index不一致")
+    indices = np.sort(one_based - 1)
+    if (indices >= snp_dim).any():
+        raise ValueError("真实QTL索引越界")
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["effect_type"]] = counts.get(row["effect_type"], 0) + 1
+    return indices, dict(sorted(counts.items()))
+
+
 def build_training_config(
     data_dir: Path, config_file: Path, output_root: Path, device: str
-) -> Any:
-    """构建未知QTL条件筛选配置，筛选参数来自正式profile。"""
+) -> tuple[Any, dict[str, Any]]:
+    """构建一套Oracle训练配置并封存真实QTL选择。"""
     data_dir = data_dir.resolve()
     manifest = _data_manifest(data_dir)
-    if manifest.get("split", {}).get("seed") != 73:
+    split = manifest.get("split", {})
+    if split.get("seed") != 73:
         raise ValueError(f"正式协议要求split seed=73: {data_dir}")
     split_file = data_dir / "splits/split_seed73.npz"
     sample_ids_file = data_dir / "sample_ids.csv"
     for path in (split_file, sample_ids_file, data_dir / "sim_pheno.csv"):
         if not path.is_file():
             raise FileNotFoundError(f"缺少训练输入: {path}")
-    return build_tfpp_config(
+    exp_name = f"{data_dir.parent.name}/{data_dir.name}"
+    selection_dir = output_root / exp_name / "oracle_selection"
+    selection_dir.mkdir(parents=True, exist_ok=True)
+    selected_file = selection_dir / "true_qtl_indices_zero_based.npy"
+    indices, effect_counts = _true_qtl(data_dir, int(manifest["genotype_shape"][1]))
+    if selected_file.exists():
+        if not np.array_equal(np.load(selected_file, allow_pickle=False), indices):
+            raise FileExistsError(f"已有不同的Oracle索引: {selected_file}")
+    else:
+        np.save(selected_file, indices, allow_pickle=False)
+    oracle_manifest = {
+        "schema_version": 1,
+        "protocol": "oracle_true_qtl20",
+        "purpose": "diagnostic_upper_reference_not_fair_method_comparison",
+        "data_dir": str(data_dir),
+        "data_manifest_sha256": _sha256(data_dir / "data_manifest.json"),
+        "causal_effects_sha256": _sha256(data_dir / "truth/causal_effects.csv"),
+        "qtl_indices_zero_based": indices.tolist(),
+        "effect_type_counts": effect_counts,
+        "split_seed": 73,
+        "train_n": int(split["train_n"]),
+    }
+    oracle_path = selection_dir / "oracle_manifest.json"
+    if oracle_path.exists():
+        if json.loads(oracle_path.read_text(encoding="utf-8")) != oracle_manifest:
+            raise FileExistsError(f"已有不同的Oracle清单: {oracle_path}")
+    else:
+        _atomic_json(oracle_path, oracle_manifest)
+    config = build_tfpp_config(
         config_file,
-        exp_name=f"{data_dir.parent.name}/{data_dir.name}",
+        exp_name=exp_name,
         output_root=str(output_root.resolve()),
         device=device,
         snp_file=str(_snp_file(data_dir, manifest)),
@@ -89,8 +151,11 @@ def build_training_config(
         time_coordinates=manifest["time_coordinates"],
         split_file=str(split_file),
         sample_ids_file=str(sample_ids_file),
-        preselected_snp_file=None,
+        preselected_snp_file=str(selected_file),
+        screen_k=0,
+        gwas_k=0,
     )
+    return config, oracle_manifest
 
 
 def _compact(run_dir: Path) -> list[str]:
@@ -127,7 +192,6 @@ def _is_complete(run_dir: Path) -> bool:
             run_dir / "test_predictions.npz",
             run_dir / "test_evaluation.json",
             run_dir / "preprocessing/preprocessing.json",
-            run_dir / "preprocessing/screened_indices.npy",
         )
     )
 
@@ -151,7 +215,7 @@ def train_one(
     device: str,
     artifact_policy: str,
 ) -> None:
-    config = build_training_config(data_dir, config_file, output_root, device)
+    config, oracle = build_training_config(data_dir, config_file, output_root, device)
     run_dir = Path(config.output_dir)
     if _is_complete(run_dir):
         raise FileExistsError(f"训练已经完成: {run_dir}")
@@ -161,15 +225,14 @@ def train_one(
         run_dir / "run_complete.json",
         {
             "schema_version": 1,
-            "experiment": "experiment2_screened",
+            "experiment": "experiment1_oracle",
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
             "data_dir": str(data_dir.resolve()),
             "device": device,
             "artifact_policy": artifact_policy,
             "removed_redundant_artifacts": removed,
             "best_epoch": int(result["best_epoch"]),
-            "screen_k": int(config.screen_k),
-            "gwas_k": int(config.gwas_k),
+            "oracle_protocol": oracle["protocol"],
         },
     )
 
@@ -258,7 +321,7 @@ def _write_batch(output_root: Path, records: list[dict[str, Any]], planned: int)
         path,
         {
             "schema_version": 1,
-            "experiment": "experiment2_screened",
+            "experiment": "experiment1_oracle",
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             "planned_jobs": planned,
             "status_counts": {
@@ -284,7 +347,7 @@ def _write_batch(output_root: Path, records: list[dict[str, Any]], planned: int)
 def run_batch(args: argparse.Namespace) -> int:
     jobs = _discover(args.data_root.resolve(), set(args.condition), set(args.rep))
     jobs = jobs if args.limit is None else jobs[: args.limit]
-    print(f"[experiment2_screened] planned_jobs={len(jobs)}")
+    print(f"[experiment1_oracle] planned_jobs={len(jobs)}")
     if args.plan_only:
         for job in jobs:
             print(f"{job['condition']}/rep_{int(job['repetition']):02d}")

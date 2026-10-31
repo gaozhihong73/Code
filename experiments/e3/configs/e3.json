@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "protocol_version": "e3_endpoint_v1",
+  "protocol_status": "development_smoke_only",
+  "condition": "P10000_NTR400_H0.8",
+  "n_snps": 10000,
+  "n_train": 400,
+  "heritability": 0.8,
+  "qtl_count": 20,
+  "time_points": 20,
+  "seed": 73,
+  "repetitions": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  "models": [
+    "Mean",
+    "Ridge-All",
+    "Ridge-A+D",
+    "GBLUP-All",
+    "RR-GBLUP",
+    "Random Forest",
+    "XGBoost",
+    "DNNGP-SNP",
+    "DLGWAS",
+    "WheatGP",
+    "Cropformer",
+    "DynaGS"
+  ],
+  "data_root": "dataset/experiments",
+  "output_root": "outputs/paper_experiments/runs/E3",
+  "dynags_source_root": "outputs/simulation/experiment2_screened",
+  "selection_metric": "validation_rmse_denormalized",
+  "model_options": {
+    "Ridge-All": {"alphas": [0.1, 1.0, 10.0, 100.0]},
+    "Ridge-A+D": {"alphas": [0.1, 1.0, 10.0, 100.0]},
+    "GBLUP-All": {"lambdas": [0.1, 1.0, 10.0, 100.0]},
+    "RR-GBLUP": {"degrees": [3], "lambdas": [0.1, 1.0, 10.0, 100.0]},
+    "Random Forest": {
+      "n_jobs": -1,
+      "candidates": [
+        {"n_estimators": 500, "max_features": 0.1, "min_samples_leaf": 1},
+        {"n_estimators": 500, "max_features": 0.3, "min_samples_leaf": 1},
+        {"n_estimators": 500, "max_features": 0.1, "min_samples_leaf": 3}
+      ]
+    },
+    "XGBoost": {
+      "device": "cuda",
+      "n_jobs": -1,
+      "early_stopping_rounds": 20,
+      "candidates": [
+        {"n_estimators": 1000, "learning_rate": 0.02, "max_depth": 4, "subsample": 0.7, "colsample_bytree": 0.3}
+      ]
+    },
+    "DNNGP-SNP": {"device": "cuda", "batch_size": 32, "max_epochs": 100, "patience": 10, "learning_rate": 0.001, "weight_decay": 0.0001, "channels": [8, 16, 32], "pooled_length": 16, "dense_units": 64, "dropout_input": 0.25, "dropout_dense": 0.25},
+    "DLGWAS": {"device": "cuda", "batch_size": 32, "max_epochs": 100, "patience": 10, "learning_rate": 0.001, "weight_decay": 0.0001, "channels": 16, "pooled_length": 16, "dropout": 0.75},
+    "WheatGP": {"device": "cuda", "batch_size": 32, "max_epochs": 100, "patience": 10, "learning_rate": 0.001, "weight_decay": 0.0001, "segment_tokens": 16, "hidden_size": 128, "cnn_dropout": 0.5, "lstm_dropout": 0.3},
+    "Cropformer": {"device": "cuda", "batch_size": 32, "max_epochs": 100, "patience": 10, "learning_rate": 0.001, "weight_decay": 0.0001, "embedding_dim": 32, "num_heads": 4, "max_tokens": 128, "hidden_dropout": 0.5, "attention_dropout": 0.5}
+  },
+  "notes": "搜索空间仅供工程 smoke；protocol_status 冻结为 formal 前不得启动10重复正式训练。"
+}

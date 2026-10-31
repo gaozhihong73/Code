@@ -13,11 +13,11 @@ from pathlib import Path
 import pandas as pd
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from experiments.simulation.generate_dataset import (
+from experiments.e1_e2.simulation.data.generate_dataset import (
     TRAIN_TO_TOTAL,
     _heritability_label,
     generate_dataset,

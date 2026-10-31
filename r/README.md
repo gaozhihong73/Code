@@ -27,8 +27,8 @@ conda run -n dynags-r Rscript -e \
 | `r/dyn_sim.R` | 生成基因型、动态遗传值、潜在曲线和观测表型 |
 | `r/generate_simulation.R` | R命令行入口，导出CSV、QTL真值和模拟配置 |
 | `prepare_simulation.py` | 校验、生成split、可选CSV转NPY、发布manifest和溯源文件 |
-| `experiments/simulation/generate_dataset.py` | 按正式实验条件调度以上步骤 |
-| `experiments/simulation/generate_all_datasets.py` | 生成、复验完整300份正式数据并写总清单 |
+| `experiments/e1_e2/simulation/data/generate_dataset.py` | 按正式实验条件调度以上步骤 |
+| `experiments/e1_e2/simulation/data/generate_all_datasets.py` | 生成、复验完整300份正式数据并写总清单 |
 
 生成器会把本次实际使用的脚本保存到共享版本包
 `dataset/experiments/provenance/generator_<hash>/`。相同脚本版本只保存一次，
@@ -64,7 +64,7 @@ rep = 1..10
 
 ```bash
 conda run -n dynags-r .venv/bin/python -B \
-  experiments/simulation/generate_dataset.py \
+  experiments/e1_e2/simulation/data/generate_dataset.py \
   --output_root dataset/experiments \
   --n_train 400 \
   --n_snps 5000 \
@@ -77,7 +77,7 @@ conda run -n dynags-r .venv/bin/python -B \
 
 ```bash
 conda run -n dynags-r .venv/bin/python -B \
-  experiments/simulation/generate_dataset.py \
+  experiments/e1_e2/simulation/data/generate_dataset.py \
   --output_root dataset/experiments \
   --n_train 400 \
   --n_snps 5000 \
@@ -131,13 +131,13 @@ dataset/experiments/
 
 ```bash
 # 只核对任务，不训练
-.venv/bin/python -B experiments/simulation/train_experiment1_oracle.py --plan-only
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py --plan-only
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment1_oracle.py --plan-only
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py --plan-only
 
 # 单卡整批运行；两个命令可同时使用cuda:0
-.venv/bin/python -B experiments/simulation/train_experiment1_oracle.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment1_oracle.py \
   --workers 1 --devices cuda:0
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --workers 1 --devices cuda:0
 ```
 
@@ -148,9 +148,9 @@ dataset/experiments/
 默认精简产物并断点续跑。限定单项可使用：
 
 ```bash
-.venv/bin/python -B experiments/simulation/train_experiment2_screened.py \
+.venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --condition P10000_NTR800_H0.4 --rep 3
 ```
 
 内部同卡并发可显式使用`--workers 2 --devices cuda:0`；显存不足时保持默认
-`--workers 1`。完整的并行、归档和产物保留规则见`experiments/simulation/README.md`。
+`--workers 1`。完整的并行、归档和产物保留规则见`experiments/e1_e2/simulation/README.md`。
