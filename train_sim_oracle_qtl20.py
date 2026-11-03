@@ -155,7 +155,6 @@ def build_config(
         sample_ids_file=str(sample_ids_path),
         preselected_snp_file=str(selected_path),
         # Oracle 与内部监督筛选互斥；这不是可调超参数。
-        screen_k=0,
         gwas_k=0,
     )
 
@@ -176,7 +175,6 @@ def build_config(
         "train_n": int(split["train_n"]),
         "split_seed": int(split["seed"]),
         "snp_file": str(snp_path),
-        "screen_k": 0,
         "gwas_k": 0,
         "ablation_mode": config.ablation_mode,
     }

@@ -213,6 +213,7 @@ def run_route(
                 probe.phenotype[split.train_idx],
                 gwas_k=spec["gwas_k"],
                 screen_k=spec["k"],
+                time_coordinates=spec["time_coordinates"],
                 block_columns=block_columns,
                 n_pcs=spec["gwas_n_pcs"],
                 pca_marker_count=spec["gwas_pca_panel_size"],

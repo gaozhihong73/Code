@@ -81,3 +81,5 @@ tests/
 !experiments/e3/
 !experiments/e3/tests/
 !experiments/e3/tests/*.py
+!experiments/plotting/
+!experiments/plotting/*.py

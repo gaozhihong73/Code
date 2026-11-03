@@ -178,7 +178,7 @@ def _dynags_reference(
             "source_run": str(source),
             "source_prediction_sha256": file_sha256(required["prediction"]),
             "ablation_mode": model_config.get("ablation_mode"),
-            "screen_k": preprocessing.get("screen_k"),
+            "screen_final_k": preprocessing.get("screen_final_k"),
             "gwas_k": preprocessing.get("gwas_k"),
             "screening_algorithm": preprocessing.get("screening_algorithm"),
         },

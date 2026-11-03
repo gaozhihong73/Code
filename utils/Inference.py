@@ -51,7 +51,9 @@ def load_inference_artifacts(exp_dir: str | Path, config: dict) -> InferenceArti
         "train_indices_sha256", "original_snp_dim", "snp_dim", "phenotype_names",
         "screening_dosage_encoding_version", "screen_missing_strategy",
         "wide_input_mode", "wide_imputer",
-        "screen_k", "gwas_k", "screen_multivariate", "screening_algorithm_version",
+        "gwas_k", "screen_final_k", "screen_min_mac",
+        "screen_max_missing_rate", "screen_multivariate",
+        "screening_algorithm_version",
     }
     missing = required - meta.keys()
     if missing:
@@ -91,7 +93,9 @@ def load_inference_artifacts(exp_dir: str | Path, config: dict) -> InferenceArti
             or (indices < 0).any() or (indices >= original_dim).any()):
         raise ValueError("screened_indices 必须是互异、合法的原始 SNP 列索引")
     for key in ("snp_dim", "phenotype_names", "wide_input_mode", "screen_missing_strategy",
-                "screen_k", "gwas_k", "screen_multivariate", "screening_algorithm_version"):
+                "gwas_k", "screen_final_k", "screen_min_mac",
+                "screen_max_missing_rate", "screen_multivariate",
+                "screening_algorithm_version"):
         if key not in config or config[key] != meta[key]:
             raise ValueError(f"model_config 与预处理元数据不一致: {key}")
     if config.get("genotype_encoding_version") != GENOTYPE_ENCODING_VERSION:

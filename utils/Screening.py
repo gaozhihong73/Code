@@ -1,8 +1,7 @@
 """SNP 特征筛选共享模块。
 
-提供 DC-SIS（距离相关系数）和 GWAS（OLS + PCA 协变量校正 min-P）两种筛选方法，
-支持多表型（默认逐表型筛选后取并集；多元模式下将多表型拼接联合筛选）、
-两阶段串联（GWAS 粗筛 → DC-SIS 精筛）、以及基于文件哈希的磁盘缓存（相同数据+参数直接加载索引，跳过计算）。
+正式入口执行训练集质量控制、PCA 校正的加性+显性联合 GWAS，再仅在 GWAS
+候选内执行 DC-SIS 并保留实验指定数量。底层旧函数仅供历史工程入口重放。
 """
 
 import hashlib
@@ -18,7 +17,10 @@ from sklearn.preprocessing import StandardScaler
 from .Genotype import GENOTYPE_ENCODING_VERSION, validate_dosage
 
 
-SCREENING_ALGORITHM_VERSION = "conditional_residual_sparse20_v1"
+SCREENING_ALGORITHM_VERSION = "qc_add_dom_gwas_candidate_dcsis_v1"
+SCREEN_MIN_MAC = 5
+SCREEN_MAX_MISSING_RATE = 0.20
+SCREEN_GWAS_BLOCK_COLUMNS = 16384
 
 
 def array_fingerprint(array: np.ndarray) -> str:
@@ -59,7 +61,6 @@ def compute_cache_key(
     snp_file: str,
     pheno_source: str,
     phenotype_names: list[str],
-    screen_k: int,
     gwas_k: int,
     seed: int,
     split_info: str = "",
@@ -70,7 +71,8 @@ def compute_cache_key(
     gwas_pca_panel_size: int | None = None,
     gwas_pca_panel_seed: int | None = None,
     gwas_pca_algorithm_version: str = "sklearn_centered_all_train_markers_v1",
-    screen_condition_k: int = 15,
+    screen_final_k: int = 20,
+    time_coordinates: list[float] | None = None,
     *,
     train_indices: np.ndarray | None = None,
     train_genotype: np.ndarray | None = None,
@@ -89,10 +91,8 @@ def compute_cache_key(
         表型文件路径或目录路径。
     phenotype_names : list[str]
         表型名称列表。
-    screen_k : int
-        DC-SIS 保留数目。
     gwas_k : int
-        GWAS 保留数目。
+        加性+显性联合 GWAS 候选池大小。
     seed : int
         随机种子（影响 train/val/test 划分）。
     split_info : str, optional
@@ -101,6 +101,10 @@ def compute_cache_key(
         是否使用多元 DC-SIS 模式（多表型拼接联合筛选），默认 ``False``。
     missing_strategy : str, optional
         显式缺失策略标识，参与缓存键；编码/算法版本也参与缓存键。
+    screen_final_k : int, optional
+        GWAS 候选内 DC-SIS 的最终 SNP 数，参与缓存键。
+    time_coordinates : list[float], optional
+        GWAS 动态性状使用的实际时间坐标，参与缓存键。
     train_indices, train_genotype, train_phenotype : np.ndarray, optional
         普通/折内训练必须同时传入训练原始行号及训练子矩阵；只哈希这些内容。
 
@@ -110,6 +114,11 @@ def compute_cache_key(
         32 位十六进制 MD5 哈希字符串。
     """
     hasher = hashlib.md5()
+    cached_time_coordinates = (
+        None
+        if time_coordinates is None
+        else np.asarray(time_coordinates, dtype=np.float64).tolist()
+    )
     # 编码/算法版本以及训练感知缓存命名空间使旧筛选缓存失效。
     hasher.update(
         f"{GENOTYPE_ENCODING_VERSION}|{SCREENING_ALGORITHM_VERSION}|{missing_strategy}".encode()
@@ -127,14 +136,17 @@ def compute_cache_key(
             "genotype_sha256": array_fingerprint(train_genotype),
             "phenotype_sha256": array_fingerprint(train_phenotype),
             "phenotype_names": list(phenotype_names),
-            "screen_k": screen_k, "gwas_k": gwas_k, "seed": seed,
+            "gwas_k": gwas_k, "seed": seed,
             "multivariate": multivariate, "split_info": split_info,
             "gwas_population_structure": gwas_population_structure,
             "gwas_n_pcs": gwas_n_pcs,
             "gwas_pca_panel_size": gwas_pca_panel_size,
             "gwas_pca_panel_seed": gwas_pca_panel_seed,
             "gwas_pca_algorithm_version": gwas_pca_algorithm_version,
-            "screen_condition_k": screen_condition_k,
+            "screen_final_k": screen_final_k,
+            "screen_min_mac": SCREEN_MIN_MAC,
+            "screen_max_missing_rate": SCREEN_MAX_MISSING_RATE,
+            "time_coordinates": cached_time_coordinates,
         }
         hasher.update(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
         return hasher.hexdigest()
@@ -152,19 +164,22 @@ def compute_cache_key(
     hasher.update("|".join(sorted(phenotype_names)).encode())
 
     # 筛选参数
-    hasher.update(f"{screen_k}_{gwas_k}_{seed}_{split_info}".encode())
+    hasher.update(f"{gwas_k}_{seed}_{split_info}".encode())
     hasher.update(json.dumps({
         "gwas_population_structure": gwas_population_structure,
         "gwas_n_pcs": gwas_n_pcs,
         "gwas_pca_panel_size": gwas_pca_panel_size,
         "gwas_pca_panel_seed": gwas_pca_panel_seed,
         "gwas_pca_algorithm_version": gwas_pca_algorithm_version,
-        "screen_condition_k": screen_condition_k,
+        "screen_final_k": screen_final_k,
+        "screen_min_mac": SCREEN_MIN_MAC,
+        "screen_max_missing_rate": SCREEN_MAX_MISSING_RATE,
+        "time_coordinates": cached_time_coordinates,
     }, sort_keys=True, separators=(",", ":")).encode())
 
-    # 筛选方法标识（多元 vs 逐表型并集）
+    # 筛选方法标识（多元联合 vs 单表型）
     hasher.update(
-        f"method={'mv_gwas_sis_v2' if multivariate else 'per_phenotype'}".encode()
+        f"method={'mv_gwas_sis_v2' if multivariate else 'single_phenotype'}".encode()
     )
 
     return hasher.hexdigest()
@@ -354,7 +369,9 @@ def dc_sis_screen(
 
 
 def _extract_dynamic_traits(
-    y_2d: np.ndarray, use_rint: bool = True
+    y_2d: np.ndarray,
+    time_coordinates: list[float] | np.ndarray,
+    use_rint: bool = True,
 ) -> np.ndarray:
     """从单表型时序数据提取 3 个动态性状 (Mean / AUC / Slope)。
 
@@ -362,6 +379,8 @@ def _extract_dynamic_traits(
     ----------
     y_2d : np.ndarray
         单表型数据, 形状为 ``(n_sample, n_time)``。
+    time_coordinates : list[float] | np.ndarray
+        与表型列一一对应、按采样先后严格递增的实际时间坐标。
     use_rint : bool, optional
         是否对每个性状做秩次逆正态变换（RINT），默认 ``True``。
 
@@ -370,7 +389,19 @@ def _extract_dynamic_traits(
     np.ndarray
         动态性状矩阵, 形状为 ``(n_sample, 3)``，列顺序为 Mean, AUC, Slope。
     """
-    time_points = np.arange(1, y_2d.shape[1] + 1, dtype=np.float64)
+    y_2d = np.asarray(y_2d)
+    if y_2d.ndim != 2:
+        raise ValueError("动态性状输入必须为二维 [个体, 时间]")
+    time_points = np.asarray(time_coordinates, dtype=np.float64)
+    if (
+        time_points.ndim != 1
+        or len(time_points) != y_2d.shape[1]
+        or not np.isfinite(time_points).all()
+        or (len(time_points) > 1 and (np.diff(time_points) <= 0).any())
+    ):
+        raise ValueError("time_coordinates 必须与表型列一一对应且严格递增")
+    if len(time_points) < 2:
+        raise ValueError("动态 AUC 和斜率至少需要两个实际时间点")
 
     feat_mean = y_2d.mean(axis=1)
     feat_auc = np.trapz(y_2d, x=time_points, axis=1)
@@ -388,10 +419,137 @@ def _extract_dynamic_traits(
     return traits
 
 
+def quality_control_snps(
+    raw_dosage: np.ndarray,
+    *,
+    min_mac: int = SCREEN_MIN_MAC,
+    max_missing_rate: float = SCREEN_MAX_MISSING_RATE,
+    verbose: bool = True,
+    logger=None,
+) -> np.ndarray:
+    """仅依据训练基因型保留缺失率合格且次要等位基因计数充足的 SNP。"""
+    dosage = np.asarray(raw_dosage)
+    if dosage.ndim != 2 or not dosage.shape[0] or not dosage.shape[1]:
+        raise ValueError("质量控制输入必须为非空二维训练剂量矩阵")
+    missing = np.isnan(dosage) | (dosage == -1)
+    valid = missing | (dosage == 0) | (dosage == 1) | (dosage == 2)
+    if not valid.all():
+        raise ValueError("质量控制输入含非 -1/0/1/2 的非法剂量")
+    observed_n = (~missing).sum(axis=0)
+    allele_count = np.where(missing, 0, dosage).sum(axis=0, dtype=np.float64)
+    minor_allele_count = np.minimum(allele_count, 2 * observed_n - allele_count)
+    missing_rate = missing.mean(axis=0)
+    keep = (
+        (observed_n > 0)
+        & (minor_allele_count >= min_mac)
+        & (missing_rate <= max_missing_rate)
+    )
+    indices = np.flatnonzero(keep).astype(np.int64)
+    if not len(indices):
+        raise ValueError("训练集 SNP 质量控制后没有可用位点")
+    if verbose:
+        _log(
+            logger,
+            f"训练集 SNP 质量控制: {dosage.shape[1]} -> {len(indices)}, "
+            f"MAC>={min_mac}, missing_rate<={max_missing_rate:.0%}",
+        )
+    return indices
+
+
+def additive_dominance_gwas_screen(
+    snp_train: np.ndarray,
+    pheno_train: np.ndarray,
+    k: int,
+    time_coordinates: list[float] | np.ndarray,
+    n_pcs: int = 5,
+    multivariate: bool = False,
+    block_columns: int = SCREEN_GWAS_BLOCK_COLUMNS,
+    verbose: bool = True,
+    logger=None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """PCA 校正的加性+显性二自由度联合 GWAS，按最小动态性状 P 值排序。"""
+    dosage = validate_dosage(snp_train)
+    n_samples, n_snps = dosage.shape
+    if k < 1 or block_columns < 1:
+        raise ValueError("GWAS 候选数和分块列数必须为正整数")
+    if multivariate:
+        traits = np.concatenate(
+            [
+                _extract_dynamic_traits(
+                    pheno_train[:, i, :], time_coordinates, use_rint=True
+                )
+                for i in range(pheno_train.shape[1])
+            ],
+            axis=1,
+        )
+    else:
+        traits = _extract_dynamic_traits(
+            pheno_train.reshape(n_samples, -1), time_coordinates, use_rint=True
+        )
+
+    n_pc = min(n_pcs, n_samples - 3, n_snps)
+    if n_pc < 1:
+        raise ValueError("训练样本或 SNP 数不足以执行 PCA 校正 GWAS")
+    pca_input = dosage.astype(np.float32, copy=False)
+    pcs = PCA(
+        n_components=n_pc,
+        svd_solver="randomized",
+        random_state=42,
+    ).fit_transform(pca_input)
+    design = np.column_stack([np.ones(n_samples), pcs])
+    q, _ = np.linalg.qr(design)
+    y_residual = traits - q @ (q.T @ traits)
+    y_sum_squares = np.sum(y_residual**2, axis=0)
+    residual_df = n_samples - design.shape[1] - 2
+    if residual_df <= 0:
+        raise ValueError("训练样本不足以执行加性+显性联合 GWAS")
+
+    min_p = np.ones(n_snps, dtype=np.float64)
+    for start in range(0, n_snps, block_columns):
+        stop = min(start + block_columns, n_snps)
+        additive = dosage[:, start:stop].astype(np.float64)
+        dominance = (additive == 1).astype(np.float64)
+        additive -= q @ (q.T @ additive)
+        dominance -= q @ (q.T @ dominance)
+
+        g_aa = np.sum(additive * additive, axis=0)
+        g_ad = np.sum(additive * dominance, axis=0)
+        g_dd = np.sum(dominance * dominance, axis=0)
+        determinant = g_aa * g_dd - g_ad**2
+        c_a = additive.T @ y_residual
+        c_d = dominance.T @ y_residual
+        valid = determinant > 1e-12
+        explained = np.zeros_like(c_a)
+        explained[valid] = (
+            g_dd[valid, None] * c_a[valid] ** 2
+            - 2 * g_ad[valid, None] * c_a[valid] * c_d[valid]
+            + g_aa[valid, None] * c_d[valid] ** 2
+        ) / determinant[valid, None]
+        explained = np.clip(explained, 0.0, y_sum_squares[None, :])
+        rss = np.maximum(y_sum_squares[None, :] - explained, 1e-20)
+        f_stat = (explained / 2.0) / (rss / residual_df)
+        block_p = stats.f.sf(f_stat, 2, residual_df)
+        block_p[~valid] = 1.0
+        min_p[start:stop] = np.nan_to_num(
+            block_p, nan=1.0, posinf=1.0, neginf=1.0
+        ).min(axis=1)
+
+    keep = min(k, n_snps)
+    indices = np.argsort(min_p, kind="stable")[:keep].astype(np.int64)
+    if verbose:
+        _log(
+            logger,
+            f"加性+显性联合 GWAS: {n_snps} -> {keep}, "
+            f"PCs={n_pc}, traits={traits.shape[1]}",
+        )
+    return indices, min_p
+
+
 def gwas_screen(
     snp_train: np.ndarray,
     pheno_train: np.ndarray,
     k: int,
+    time_coordinates: list[float] | np.ndarray,
     n_pcs: int = 5,
     use_rint: bool = True,
     multivariate: bool = False,
@@ -415,6 +573,8 @@ def gwas_screen(
         多元模式 (``multivariate=True``): ``(n_sample, n_pheno, n_time)``。
     k : int
         保留的 SNP 数目。
+    time_coordinates : list[float] | np.ndarray
+        与表型列对应的实际采样坐标；AUC 和斜率均在此坐标上计算。
     n_pcs : int, optional
         PCA 主成分个数，作为群体结构校正协变量，默认 ``5``。
     use_rint : bool, optional
@@ -438,7 +598,9 @@ def gwas_screen(
     if multivariate:
         n_pheno = pheno_train.shape[1]
         trait_cols = [
-            _extract_dynamic_traits(pheno_train[:, i, :], use_rint)
+            _extract_dynamic_traits(
+                pheno_train[:, i, :], time_coordinates, use_rint
+            )
             for i in range(n_pheno)
         ]
         Y = np.concatenate(trait_cols, axis=1)  # [N, n_pheno*3]
@@ -447,7 +609,7 @@ def gwas_screen(
         ]
     else:
         y_2d = pheno_train.reshape(N, -1)  # [N, T]
-        Y = _extract_dynamic_traits(y_2d, use_rint)  # [N, 3]
+        Y = _extract_dynamic_traits(y_2d, time_coordinates, use_rint)  # [N, 3]
         trait_names = ["Mean", "AUC", "Slope"]
     F = Y.shape[1]
 
@@ -518,7 +680,7 @@ def sparse_multitask_refine(
     verbose: bool = True,
     logger=None,
 ) -> np.ndarray:
-    """以固定多任务 Elastic Net 在候选内保留 20 个 SNP。
+    """以固定多任务 Elastic Net 在候选内保留实验指定数量的 SNP。
 
     固定正则化避免每个重复都进行大规模交叉验证，使模拟实验的筛选协议
     保持唯一且运行时间可控。
@@ -535,6 +697,10 @@ def sparse_multitask_refine(
         raise ValueError("稀疏精筛候选必须是有效、互异的原始SNP索引")
     if final_k < 1:
         raise ValueError("稀疏精筛 final_k 必须为正整数")
+    if final_k > len(candidates):
+        raise ValueError(
+            f"稀疏精筛候选数 {len(candidates)} 少于要求的 final_k={final_k}"
+        )
 
     candidate_dosage = dosage[:, candidates]
     features = np.concatenate(
@@ -566,7 +732,7 @@ def sparse_multitask_refine(
     group_score = np.sqrt(
         np.sum(coefficient[:, :count] ** 2 + coefficient[:, count:] ** 2, axis=0)
     )
-    keep = min(final_k, count)
+    keep = final_k
     local = np.argsort(-group_score, kind="stable")[:keep]
     selected = np.sort(candidates[local])
     if verbose:
@@ -585,6 +751,7 @@ def conditional_residual_union_screen(
     *,
     gwas_k: int,
     screen_k: int,
+    time_coordinates: list[float] | np.ndarray,
     condition_k: int = 15,
     n_pcs: int = 5,
     multivariate: bool = True,
@@ -604,6 +771,7 @@ def conditional_residual_union_screen(
             dosage,
             target,
             k=n_snps,
+            time_coordinates=time_coordinates,
             n_pcs=n_pcs,
             multivariate=multivariate,
             verbose=False,
@@ -674,6 +842,7 @@ def gwas_dc_sis_screen_mmap(
     *,
     gwas_k: int,
     screen_k: int,
+    time_coordinates: list[float] | np.ndarray,
     block_columns: int = 16384,
     n_pcs: int = 5,
     pca_marker_count: int = 20000,
@@ -736,10 +905,14 @@ def gwas_dc_sis_screen_mmap(
 
     if multivariate:
         traits = np.concatenate([
-            _extract_dynamic_traits(pheno_train[:, i, :], True)
+            _extract_dynamic_traits(
+                pheno_train[:, i, :], time_coordinates, True
+            )
             for i in range(pheno_train.shape[1])], axis=1)
     else:
-        traits = _extract_dynamic_traits(pheno_train.reshape(n, -1), True)
+        traits = _extract_dynamic_traits(
+            pheno_train.reshape(n, -1), time_coordinates, True
+        )
     design = np.column_stack([np.ones(n), pcs])
     q, _ = np.linalg.qr(design)
     y_res = traits - q @ (q.T @ traits)
@@ -821,31 +994,28 @@ def gwas_dc_sis_screen_mmap(
 
 
 # ---------------------------------------------------------------------------
-# 统一筛选入口（多表型 + 两阶段 + 缓存）
+# 正式筛选入口（质量控制 + 加性/显性 GWAS + 候选内 DC-SIS）
 # ---------------------------------------------------------------------------
 
 
 def screen_snps(
     snp_train: np.ndarray,
     pheno_train: np.ndarray,
-    screen_k: int = 0,
+    time_coordinates: list[float] | np.ndarray,
     gwas_k: int = 0,
+    qc_dosage: np.ndarray | None = None,
     multivariate: bool = False,
     cache_key: str | None = None,
     cache_dir: str = "dataset/screen_cache",
     verbose: bool = True,
     logger=None,
     n_pcs: int = 5,
-    condition_k: int = 15,
+    final_k: int = 20,
 ) -> np.ndarray | None:
-    """统一 SNP 筛选入口：多表型 + 两阶段串联 + 磁盘缓存。
+    """正式 SNP 筛选入口：QC → 加性+显性 GWAS → 候选内 DC-SIS → final-K。
 
-    默认对多表型数据 ``(N, n_pheno, T)`` 逐表型独立筛选后取并集；
-    ``multivariate=True`` 时改为多元联合筛选：GWAS 将各表型的动态性状拼接为
-    ``(N, n_pheno*3)`` 一次回归取 min-P，DC-SIS 将各表型 z-score 标准化后
-    拼接为 ``(N, n_pheno * T)`` 一次筛选，即 SNP 与 Y=(Y1,Y2,...,Yk) 联合关联。
-    两阶段策略：GWAS 先在全 P 维向量化粗筛，DC-SIS 再在 GWAS 筛后的
-    子集上精筛（避免对 2M SNP 跑 Python 循环）。
+    ``snp_train`` 必须是仅由训练个体拟合缺失值后的完整剂量；``qc_dosage``
+    保留填补前缺失标记，仅用于训练集 MAC 与缺失率质量控制。
 
     Parameters
     ----------
@@ -853,17 +1023,17 @@ def screen_snps(
         完整的离散剂量0/1/2，形状为 ``(n_sample, n_snp)``；拒绝缺失与模型类别码。
     pheno_train : np.ndarray
         训练集表型数据，形状为 ``(n_sample, n_pheno, n_time)``。
-    screen_k : int, optional
-        DC-SIS 保留的 SNP 数目，``0`` 表示跳过，默认 ``0``。
+    time_coordinates : list[float] | np.ndarray
+        与表型时间列一一对应的实际采样坐标，用于 GWAS 的 AUC 和斜率。
     gwas_k : int, optional
-        GWAS 保留的 SNP 数目，``0`` 表示跳过，默认 ``0``。
+        加性+显性联合 GWAS 候选池大小；``0`` 表示关闭内部筛选。
     multivariate : bool, optional
         是否使用多元联合筛选（GWAS 与 DC-SIS 均多表型拼接联合筛选）。
-        ``False`` 时逐表型筛选取并集，默认 ``False``。
+        ``False`` 仅用于单表型数据，默认 ``False``。
     cache_key : str | None, optional
         缓存哈希键。传入时启用磁盘缓存；``None`` 表示不缓存，默认 ``None``。
     cache_dir : str, optional
-        缓存文件存放目录，默认 ``'outputs/screen_cache'``。
+        缓存文件存放目录，默认 ``'dataset/screen_cache'``。
     verbose : bool, optional
         是否打印筛选信息，默认 ``True``。
     logger : optional
@@ -872,20 +1042,51 @@ def screen_snps(
     Returns
     -------
     np.ndarray | None
-        排序后的 SNP 列索引数组；若 screen_k 和 gwas_k 均为 0 则返回 ``None``。
+        排序后的原始 SNP 列索引数组；若 ``gwas_k=0`` 则返回 ``None``。
     """
     # 即使缓存命中或筛选关闭，也不能让非法类别码/缺失绕过剂量契约。
     snp_train = validate_dosage(snp_train)
-    if screen_k <= 0 and gwas_k <= 0:
+    if gwas_k == 0:
         return None
+    if gwas_k < 1 or final_k < 1 or final_k > gwas_k:
+        raise ValueError("筛选要求 1 <= final_k <= gwas_k")
+    pheno_train = np.asarray(pheno_train)
+    if pheno_train.ndim != 3 or pheno_train.shape[0] != len(snp_train):
+        raise ValueError("筛选表型必须为 [个体, 表型, 时间] 且与 SNP 行数一致")
+    if not multivariate and pheno_train.shape[1] != 1:
+        raise ValueError("multivariate=false 仅支持单表型筛选")
+    # 在缓存读取前验证实际时间轴，避免无效坐标绕过动态性状契约。
+    _extract_dynamic_traits(
+        pheno_train[:, 0, :], time_coordinates, use_rint=False
+    )
 
-    N, P = snp_train.shape
+    _, P = snp_train.shape
     n_pheno = pheno_train.shape[1]
+    qc_indices = quality_control_snps(
+        snp_train if qc_dosage is None else qc_dosage,
+        verbose=verbose,
+        logger=logger,
+    )
+    if qc_dosage is not None and np.asarray(qc_dosage).shape != snp_train.shape:
+        raise ValueError("填补前后筛选剂量矩阵形状必须一致")
+    if len(qc_indices) < final_k:
+        raise ValueError(
+            f"质量控制后仅有 {len(qc_indices)} 个 SNP，少于 final_k={final_k}"
+        )
 
     # ---- 尝试加载缓存 ----
     if cache_key is not None:
         cached = _load_cache(cache_key, cache_dir, logger=logger)
         if cached is not None:
+            if (
+                cached.shape != (final_k,)
+                or cached.dtype.kind not in "iu"
+                or np.unique(cached).size != final_k
+                or (cached < 0).any()
+                or (cached >= P).any()
+                or not np.isin(cached, qc_indices).all()
+            ):
+                raise ValueError("筛选缓存与 final_k 或当前 SNP 维度不一致")
             return cached
 
     if verbose:
@@ -894,169 +1095,46 @@ def screen_snps(
         _log(logger, f"  编码版本: {GENOTYPE_ENCODING_VERSION}")
         _log(logger, f"  筛选算法版本: {SCREENING_ALGORITHM_VERSION}")
         _log(logger, f"  原始特征数: {P}")
+        _log(logger, f"  QC后特征数: {len(qc_indices)}")
         _log(logger, f"  表型数量:   {n_pheno}")
-        _log(logger, f"  screen_k:   {screen_k}")
         _log(logger, f"  gwas_k:     {gwas_k}")
-        _log(logger, f"  筛选模式: {'多元联合 (GWAS+DC-SIS)' if multivariate else '逐表型并集'}")
+        _log(logger, f"  final_k:    {final_k}")
+        _log(logger, f"  时间坐标:  {list(time_coordinates)}")
+        _log(logger, f"  筛选模式: {'多元联合 (GWAS+DC-SIS)' if multivariate else '单表型'}")
         _log(logger, "=" * 60)
 
-    screened_idx = conditional_residual_union_screen(
-        snp_train,
+    qc_matrix = snp_train[:, qc_indices]
+    gwas_local, _ = additive_dominance_gwas_screen(
+        qc_matrix,
         pheno_train,
-        gwas_k=gwas_k,
-        screen_k=screen_k,
-        condition_k=condition_k,
+        time_coordinates=time_coordinates,
+        k=min(gwas_k, len(qc_indices)),
         n_pcs=n_pcs,
         multivariate=multivariate,
         verbose=verbose,
         logger=logger,
     )
-    screened_idx = sparse_multitask_refine(
-        snp_train,
-        pheno_train,
-        screened_idx,
-        final_k=20,
+    candidate_indices = qc_indices[gwas_local]
+    candidate_dosage = snp_train[:, candidate_indices]
+    dc_target = (
+        _multivariate_pheno_matrix(pheno_train, logger=logger)
+        if multivariate
+        else pheno_train[:, 0, :]
+    )
+    dc_local, _ = dc_sis_screen(
+        candidate_dosage,
+        dc_target,
+        k=final_k,
         verbose=verbose,
         logger=logger,
     )
-    if cache_key is not None:
-        _save_cache(cache_key, cache_dir, screened_idx, logger=logger)
-    return screened_idx
-
-    # ---- 两阶段串联 ----
-    # 阶段 1: GWAS 在全 P 维向量化粗筛（快，几分钟内完成 2M）
-    gwas_union = None
-    if gwas_k > 0 and gwas_k < P:
-        if multivariate:
-            # 多元模式: 多表型拼接动态性状一次回归, 直接取全局 top-k
-            if verbose:
-                _log(logger, f"[阶段1] 多元 GWAS 粗筛: {P} -> top-{gwas_k}")
-            idx_gwas, _ = gwas_screen(
-                snp_train,
-                pheno_train,
-                k=gwas_k,
-                n_pcs=n_pcs,
-                multivariate=True,
-                verbose=verbose,
-                logger=logger,
-            )
-            gwas_union = np.asarray(idx_gwas)
-            if verbose:
-                _log(logger, f"  多元 GWAS 联合筛选: {len(gwas_union)} SNPs")
-        else:
-            if verbose:
-                _log(logger, f"[阶段1] GWAS 粗筛: {P} -> 每表型 top-{gwas_k}")
-            gwas_sets = []
-            for i in range(n_pheno):
-                pheno_i = pheno_train[:, i, :]  # (N, T)
-                if verbose:
-                    _log(logger, f"  表型 {i + 1}/{n_pheno}:")
-                idx_i, _ = gwas_screen(
-                    snp_train, pheno_i, k=gwas_k, n_pcs=n_pcs,
-                    verbose=verbose, logger=logger
-                )
-                gwas_sets.append(idx_i)
-            gwas_union = np.unique(np.concatenate(gwas_sets))
-            if verbose:
-                _log(logger, f"  GWAS 跨表型并集: {len(gwas_union)} SNPs")
-
-    # 阶段 2: DC-SIS 筛选
-    # P 较小时直接在全维度独立跑（并行策略，能发现 GWAS 遗漏的位点）
-    # P 很大时（>5万）在 GWAS 子集上跑（串联策略，避免 Python 循环数小时）
-    DC_SIS_FULL_THRESHOLD = 50000
-    dc_union = None
-    use_gwas_subset = gwas_union is not None and P > DC_SIS_FULL_THRESHOLD
-    if screen_k > 0 and screen_k < P:
-        if use_gwas_subset:
-            subset = np.sort(np.asarray(gwas_union))
-            snp_subset = snp_train[:, subset]
-            if verbose:
-                _log(
-                    logger,
-                    f"[阶段2] DC-SIS 精筛 (串联): 在 GWAS 候选 {len(subset)} SNPs 上, "
-                    f"每表型 top-{screen_k}",
-                )
-        else:
-            subset = np.arange(P)
-            snp_subset = snp_train
-            if verbose:
-                _log(logger, f"[DC-SIS] 全维度独立筛选: P={P}, 每表型 top-{screen_k}")
-
-        dc_sets = []
-        if multivariate:
-            # 多元模式: 各表型 z-score 标准化后拼接为 (N, n_pheno*T), 一次筛选
-            if verbose:
-                _log(
-                    logger,
-                    f"  多元 DC-SIS: 多表型拼接联合筛选 top-{screen_k}",
-                )
-            y_flat = _multivariate_pheno_matrix(pheno_train, logger=logger)
-            idx_local, _ = dc_sis_screen(
-                snp_subset, y_flat, k=screen_k, verbose=verbose, logger=logger
-            )
-            dc_sets.append(subset[idx_local])
-        else:
-            for i in range(n_pheno):
-                pheno_i = pheno_train[:, i, :]
-                if verbose:
-                    _log(logger, f"  表型 {i + 1}/{n_pheno}:")
-                idx_local, _ = dc_sis_screen(
-                    snp_subset, pheno_i, k=screen_k, verbose=verbose, logger=logger
-                )
-                # 将子集局部索引映射回原始列索引
-                dc_sets.append(subset[idx_local])
-        dc_union = np.unique(np.concatenate(dc_sets))
-        if verbose:
-            _log(logger, f"  DC-SIS 保留 SNPs: {len(dc_union)}")
-
-    # ---- 合并最终结果 ----
-    if dc_union is not None and gwas_union is not None:
-        if use_gwas_subset:
-            # 串联模式: GWAS 仅做预过滤, 最终结果取 DC-SIS 精选
-            screened_idx = dc_union
-            if verbose:
-                _log(
-                    logger,
-                    f"串联模式: GWAS 预筛 {len(gwas_union)} -> "
-                    f"DC-SIS 精选 {len(dc_union)} SNPs (最终结果)",
-                )
-        else:
-            # 并行模式: 两者独立筛选, 取并集
-            screened_idx = np.union1d(dc_union, gwas_union)
-            if verbose:
-                overlap = len(dc_union) + len(gwas_union) - len(screened_idx)
-                _log(
-                    logger,
-                    f"最终并集: DC-SIS {len(dc_union)} ∪ GWAS {len(gwas_union)} "
-                    f"= {len(screened_idx)} SNPs (交集 {overlap})",
-                )
-    elif dc_union is not None:
-        screened_idx = dc_union
-    else:
-        screened_idx = gwas_union
-
-    if screened_idx is None:
-        return None  # k >= 原始维度时保持全列，不尝试把 None 转成索引。
-    screened_idx = np.sort(np.asarray(screened_idx)).astype(np.int64)
-    if method == "legacy_sparse_refine":
-        if final_k is None:
-            raise ValueError("legacy_sparse_refine 必须显式设置 final_k")
-        screened_idx = sparse_multitask_refine(
-            snp_train,
-            pheno_train,
-            screened_idx,
-            final_k=final_k,
-            seed=73,
-            verbose=verbose,
-            logger=logger,
-        )
-
+    screened_idx = np.sort(candidate_indices[dc_local]).astype(np.int64)
     if verbose:
-        _log(logger, f"筛选完成: {P} -> {len(screened_idx)} SNPs")
-        _log(logger, "=" * 60)
-
-    # ---- 写入缓存 ----
+        _log(
+            logger,
+            f"正式筛选完成: raw={P}, qc={len(qc_indices)}, "
+            f"gwas={len(candidate_indices)}, final={len(screened_idx)}",
+        )
     if cache_key is not None:
         _save_cache(cache_key, cache_dir, screened_idx, logger=logger)
-
     return screened_idx

@@ -66,7 +66,7 @@ dataset/maize/
 
 1. **加载数据**：读取 SNP 矩阵及指定表型 CSV，校验样本数和时间点。
 2. **划分个体**：普通模式按 `train/val/test` 比例划分；可用 `--split_file` 固定或复用。K 折模式为每一折分别确定训练、验证和测试个体。
-3. **训练集内预处理**：仅使用训练个体拟合 SNP 缺失填补、GWAS/DC-SIS 筛选及表型归一化器；验证和测试数据只应用已拟合的结果。
+3. **训练集内预处理**：仅使用训练个体拟合 SNP 缺失填补、SNP质量控制、加性+显性联合GWAS、候选内DC-SIS及表型归一化器；验证和测试数据只应用已拟合的结果。
 4. **构建模型**：按筛选后的 SNP 数初始化 TFPP，Wide 通路建模时间趋势，Deep 通路学习 SNP 交互，再经门控融合。
 5. **训练与选择**：采用 AdamW、Warmup + Cosine 学习率调度和梯度裁剪；按验证损失保存最佳权重，并使用 `patience` 早停。
 6. **测试与保存**：恢复最佳验证权重后对测试集评估一次，保存模型、划分、筛选索引、归一化器、日志和训练历史。
@@ -120,16 +120,12 @@ uv run python train.py \
 
 ### SNP 筛选与缺失值
 
-`--gwas_k` 指定 GWAS 保留位点数，`--screen_k` 指定 DC-SIS 保留位点数；设为 `0` 即跳过对应步骤。筛选仅使用训练个体及其标签，不读取验证集或测试集标签。
+`gwas_k` 指定加性+显性联合 GWAS 的候选池大小，`screen_final_k` 指定候选内
+DC-SIS 最终保留数；`gwas_k=0` 关闭内部筛选。质量控制固定使用训练集 MAC≥5、
+缺失率≤20%，筛选不读取验证集或测试集标签。
 
 ```bash
-uv run python train.py \
-  --exp_name maize_screened \
-  --gwas_k 10000 \
-  --screen_k 10000 \
-  --screen_multivariate true \
-  --screen_missing_strategy mode \
-  --wide_missing_strategy mode
+uv run python train.py --config config/profiles/maize.json
 ```
 
 `screen_missing_strategy=mode` 只依据训练个体，按位点以众数填补筛选阶段的缺失值；Deep 通路仍保留自身缺失类别。使用 `error` 时，检测到缺失值会直接报错。
@@ -147,7 +143,7 @@ uv run python train.py \
 | `--patience` | `20` | 验证损失无改善时的早停轮数 |
 | `--norm_method` | `residual_global` | `global`、`timepoint` 或 `residual_global` |
 | `--scaler_type` | `zscore` | `zscore`、`minmax` 或 `robust` |
-| `--gwas_k` / `--screen_k` | `10000` / `10000` | GWAS 与 DC-SIS 保留数，`0` 为关闭 |
+| `gwas_k` / `screen_final_k` | profile指定 | GWAS候选池与候选内DC-SIS最终保留数 |
 | `--degree` | `5` | Wide 通路 Legendre 多项式阶数 |
 | `--ablation_mode` | `all` | `all`、`wide`、`deep` 或 `add` |
 | `--use_kfold` / `--n_folds` | `false` / `10` | 是否使用 K 折及折数 |

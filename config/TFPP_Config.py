@@ -4,6 +4,7 @@
 全部超参数、数据路径、模型结构参数和输出目录。
 """
 
+import math
 from datetime import datetime
 from typing import Literal
 
@@ -45,6 +46,17 @@ class TFPPConfig(BaseModel):
         min_length=1,
         description="表型列对应的时间坐标；顺序和长度必须与每个表型 CSV 的时间列一致。",
     )
+
+    @field_validator("time_coordinates")
+    @classmethod
+    def _validate_time_coordinates(cls, values: list[float]) -> list[float]:
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("time_coordinates 必须全部为有限值")
+        if len(values) > 1 and any(
+            current <= previous for previous, current in zip(values, values[1:])
+        ):
+            raise ValueError("time_coordinates 必须按采样先后严格递增")
+        return values
     phenotype_names: list[str] = Field(
         min_length=1,
         description="待预测表型名称；名称同时用于定位 pheno_dir 中的 <名称>.csv 文件。",
@@ -167,24 +179,35 @@ class TFPPConfig(BaseModel):
         description="可选的原始 SNP 有序列索引 .npy；提供后跳过内部筛选并直接使用该特征集合。",
     )
 
-    # SNP 特征筛选参数 (0=不筛选)
-    screen_k: int = Field(
-        default=0,
-        ge=0,
-        description="DC-SIS 筛选保留的 SNP 数目, 0=跳过",
-    )
+    # SNP 特征筛选参数 (gwas_k=0 时不筛选)
     gwas_k: int = Field(
         default=0,
         ge=0,
-        description="GWAS 筛选保留的 SNP 数目, 0=跳过",
+        description="质量控制后加性+显性联合 GWAS 的候选池大小；0=关闭内部筛选。",
     )
     gwas_population_structure: Literal["pca"] = Field(default="pca", description="GWAS 群体结构校正方法；当前只支持 PCA。")
     gwas_n_pcs: int = Field(default=5, ge=1, description="GWAS 中作为协变量的主成分数量。")
-    screen_condition_k: int = Field(
-        default=15,
+    screen_final_k: int = Field(
+        default=20,
         ge=1,
-        description="条件残差筛选第一轮用于回归消除的强关联SNP数",
+        description="候选内 DC-SIS 最终保留的 SNP 数；按实验显式设置。",
     )
+
+    @model_validator(mode="after")
+    def _validate_screening_protocol(self):
+        if self.gwas_k > 0 and len(self.time_coordinates) < 2:
+            raise ValueError("GWAS 动态性状筛选至少需要两个实际时间坐标")
+        if self.gwas_k > 0 and self.screen_final_k > self.gwas_k:
+            raise ValueError("screen_final_k 不能超过 gwas_k 候选池")
+        if (
+            self.gwas_k > 0
+            and not self.screen_multivariate
+            and len(self.phenotype_names) != 1
+        ):
+            raise ValueError(
+                "screen_multivariate=false 仅支持单表型；多表型正式筛选必须使用联合模式"
+            )
+        return self
 
     gwas_pca_panel_size: int | None = Field(
         default=None,
@@ -211,7 +234,7 @@ class TFPPConfig(BaseModel):
     )
     screen_multivariate: bool = Field(
         default=True,
-        description="DC-SIS 多元模式: True=多表型拼接联合筛选, False=逐表型筛选取并集",
+        description="True=多表型拼接联合筛选；False=单表型模式，不支持多表型逐项并集。",
     )
     screen_missing_strategy: str = Field(
         default="mode",

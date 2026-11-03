@@ -128,14 +128,17 @@ Oracle 输入下的传统基线模型使用同一份数据、固定划分和 20 
 
 ## 改进筛选协议
 
-未知QTL条件通过专用 runner 启用固定的条件残差筛选：
+未知QTL条件通过专用 runner 启用固定筛选协议：
 
 ```bash
 .venv/bin/python -B experiments/e1_e2/simulation/runners/train_experiment2_screened.py \
   --condition P5000_NTR400_H0.4 --rep 1
 ```
 
-该 runner 自动读取数据 manifest、固定划分和时间坐标。筛选参数统一由 `config/profiles/simulation.json` 管理：第一轮多元 GWAS 与 DC-SIS，选取最强15个位点回归其加性和显性效应，再对残差进行第二轮相同筛选；合并候选后以固定多任务 Elastic Net 保留20个 SNP。筛选只使用训练集；开发数据不得作为独立正式重复。
+该 runner 自动读取数据 manifest、固定划分和时间坐标。筛选参数统一由
+`config/profiles/simulation.json` 管理：训练集内按 MAC≥5、缺失率≤20% 做质量
+控制，执行 PCA 校正的加性+显性联合 GWAS，再仅在 GWAS 候选内执行多元
+DC-SIS并保留 `screen_final_k` 个 SNP。开发数据不得作为独立正式重复。
 
 ## 探索性互作敏感性分析
 

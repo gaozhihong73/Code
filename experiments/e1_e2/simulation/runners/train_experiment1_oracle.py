@@ -152,7 +152,6 @@ def build_training_config(
         split_file=str(split_file),
         sample_ids_file=str(sample_ids_file),
         preselected_snp_file=str(selected_file),
-        screen_k=0,
         gwas_k=0,
     )
     return config, oracle_manifest

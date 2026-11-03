@@ -168,7 +168,7 @@ def train_one(
             "artifact_policy": artifact_policy,
             "removed_redundant_artifacts": removed,
             "best_epoch": int(result["best_epoch"]),
-            "screen_k": int(config.screen_k),
+            "screen_final_k": int(config.screen_final_k),
             "gwas_k": int(config.gwas_k),
         },
     )

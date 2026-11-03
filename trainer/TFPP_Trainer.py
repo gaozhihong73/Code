@@ -37,6 +37,8 @@ from utils.Genotype import (
 )
 from utils.Screening import (
     SCREENING_ALGORITHM_VERSION,
+    SCREEN_MAX_MISSING_RATE,
+    SCREEN_MIN_MAC,
     array_fingerprint,
     training_indices_hash,
 )
@@ -148,15 +150,14 @@ class TFPPTrainer:
         self.logger = Logger(self.log_file, unique=False)
 
         # 普通训练和每个折实验均先划分再筛选；外层协调器不筛选或初始化模型。
-        self.screen_k = config.screen_k
         self.gwas_k = config.gwas_k
-        self.screen_condition_k = config.screen_condition_k
+        self.screen_final_k = config.screen_final_k
         self.screen_multivariate = config.screen_multivariate
         self.screen_missing_strategy = config.screen_missing_strategy
         self.logger.info(
             f"筛选配置: screen_multivariate={self.screen_multivariate}, "
             f"screen_missing_strategy={self.screen_missing_strategy}, "
-            f"screening_algorithm=conditional_residual"
+            f"screening_algorithm=qc_add_dom_gwas_candidate_dcsis"
         )
         self.use_kfold = config.use_kfold
         self.n_folds = config.n_folds
@@ -265,7 +266,6 @@ class TFPPTrainer:
             self.snp_file,
             self.pheno_dir,
             self.phenotype_names,
-            self.screen_k,
             self.gwas_k,
             self.seed,
             split_info=(
@@ -282,7 +282,8 @@ class TFPPTrainer:
             gwas_pca_panel_size=self.config.gwas_pca_panel_size,
             gwas_pca_panel_seed=self.config.gwas_pca_panel_seed,
             gwas_pca_algorithm_version=self.config.gwas_pca_algorithm_version,
-            screen_condition_k=self.screen_condition_k,
+            screen_final_k=self.screen_final_k,
+            time_coordinates=self.time_coordinates,
             train_indices=train_idx,
             train_genotype=train_codes,
             train_phenotype=train_phenotype,
@@ -290,10 +291,10 @@ class TFPPTrainer:
         screening_imputer = None
         selected = None
         if self.config.preselected_snp_file is not None:
-            if self.screen_k or self.gwas_k:
+            if self.gwas_k:
                 raise ValueError("preselected_snp_file 不能与内部监督筛选同时启用")
             selected = np.load(self.config.preselected_snp_file, allow_pickle=False)
-        elif self.screen_k > 0 or self.gwas_k > 0:
+        elif self.gwas_k > 0:
             if self.screen_missing_strategy == "mode":
                 screening_imputer = TrainingDosageImputer("mode").fit(
                     train_dosage, train_idx=np.arange(len(train_idx), dtype=np.int64)
@@ -307,14 +308,15 @@ class TFPPTrainer:
                     imputer=screening_imputer,
                 ),
                 train_phenotype,
-                screen_k=self.screen_k,
+                time_coordinates=self.time_coordinates,
                 gwas_k=self.gwas_k,
+                qc_dosage=train_dosage,
                 multivariate=self.screen_multivariate,
                 cache_key=self.screening_cache_key,
                 cache_dir=self.config.screen_cache_dir,
                 logger=self.logger,
                 n_pcs=self.config.gwas_n_pcs,
-                condition_k=self.screen_condition_k,
+                final_k=self.screen_final_k,
             )
         self.screened_indices = (
             np.arange(self.original_snp_dim)
@@ -418,10 +420,11 @@ class TFPPTrainer:
                     dtype=np.float32,
                 )
             ),
-            "screen_k": self.screen_k,
             "gwas_k": self.gwas_k,
-            "screening_algorithm": "conditional_residual",
-            "screen_condition_k": self.screen_condition_k,
+            "screening_algorithm": "qc_add_dom_gwas_candidate_dcsis",
+            "screen_final_k": self.screen_final_k,
+            "screen_min_mac": SCREEN_MIN_MAC,
+            "screen_max_missing_rate": SCREEN_MAX_MISSING_RATE,
             "gwas_population_structure": self.config.gwas_population_structure,
             "gwas_n_pcs": self.config.gwas_n_pcs,
             "gwas_pca_panel_size": self.config.gwas_pca_panel_size,
@@ -1586,10 +1589,15 @@ class TFPPTrainer:
         self.logger.info("数据预处理:")
         self.logger.info(f"    norm_method: {self.norm_method}")
         self.logger.info(f"    scaler_type: {self.scaler_type}")
-        self.logger.info(f"    screen_k: {self.screen_k}")
         self.logger.info(f"    gwas_k: {self.gwas_k}")
-        self.logger.info("    screening_algorithm: conditional_residual")
-        self.logger.info(f"    screen_condition_k: {self.screen_condition_k}")
+        self.logger.info(
+            "    screening_algorithm: qc_add_dom_gwas_candidate_dcsis"
+        )
+        self.logger.info(f"    screen_final_k: {self.screen_final_k}")
+        self.logger.info(f"    screen_min_mac: {SCREEN_MIN_MAC}")
+        self.logger.info(
+            f"    screen_max_missing_rate: {SCREEN_MAX_MISSING_RATE}"
+        )
         self.logger.info(f"    screen_multivariate: {self.screen_multivariate}")
         self.logger.info(f"    screen_missing_strategy: {self.screen_missing_strategy}")
 

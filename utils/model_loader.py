@@ -20,7 +20,11 @@ import torch
 
 from model.TFPP import TFPP
 from .Genotype import GENOTYPE_ENCODING_VERSION
-from .Screening import SCREENING_ALGORITHM_VERSION
+from .Screening import (
+    SCREENING_ALGORITHM_VERSION,
+    SCREEN_MAX_MISSING_RATE,
+    SCREEN_MIN_MAC,
+)
 
 
 def _infer_params_from_state_dict(ckpt: dict) -> dict:
@@ -326,8 +330,10 @@ def save_model_config(config, model_dir: str | Path) -> None:
         "time_coordinates": config.time_coordinates,
         "time_points": len(config.time_coordinates),
         "phenotype_names": config.phenotype_names,
-        "screen_k": config.screen_k,
         "gwas_k": config.gwas_k,
+        "screen_final_k": config.screen_final_k,
+        "screen_min_mac": SCREEN_MIN_MAC,
+        "screen_max_missing_rate": SCREEN_MAX_MISSING_RATE,
         "gwas_population_structure": getattr(config, "gwas_population_structure", "pca"),
         "gwas_n_pcs": getattr(config, "gwas_n_pcs", 5),
         "gwas_pca_panel_size": getattr(config, "gwas_pca_panel_size", None),

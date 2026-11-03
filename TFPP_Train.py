@@ -55,7 +55,6 @@ def _build_config(phenotypes: list[str]) -> TFPPConfig:
         val_ratio=0.1,  # 验证集比例
         num_workers=8,  # DataLoader 工作进程数
         gwas_k=100000,
-        screen_k=10000,
         screen_multivariate=True,
     )
 

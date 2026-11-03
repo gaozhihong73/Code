@@ -188,31 +188,19 @@ def _legacy_parse_args():
 
     # ================= SNP 特征筛选 =================
     parser.add_argument(
-        "--screen_k",
-        type=int,
-        default=10000,
-        help=(
-            "DC-SIS (距离相关确定独立性筛选) 保留的 SNP 数目。"
-            "基于非线性距离相关系数衡量每个 SNP 与表型的关联强度。"
-            "0=跳过此步骤"
-        ),
-    )
-    parser.add_argument(
         "--gwas_k",
         type=int,
         default=10000,
         help=(
-            "GWAS (全基因组关联分析) 筛选保留的 SNP 数目。"
-            "使用向量化 F 检验快速粗筛高维 SNP。"
-            "普通入口按生产筛选策略：P>50000串联，否则两者并集；严格串联请用统一 runner。"
-            "0=跳过此步骤"
+            "质量控制后加性+显性联合 GWAS 的候选池大小；动态 AUC 和斜率"
+            "使用 time_coordinates；0=关闭内部筛选"
         ),
     )
     parser.add_argument(
-        "--screen_condition_k",
+        "--screen_final_k",
         type=int,
-        default=TFPPConfig.model_fields["screen_condition_k"].default,
-        help="条件残差筛选中用于拟合并去除的强关联SNP数",
+        default=TFPPConfig.model_fields["screen_final_k"].default,
+        help="GWAS 候选内 DC-SIS 最终保留的 SNP 数",
     )
     parser.add_argument(
         "--screen_multivariate",
@@ -221,7 +209,7 @@ def _legacy_parse_args():
         help=(
             "DC-SIS 多元模式: true=将多表型 z-score 标准化后拼接为多维 Y,"
             " SNP 与 Y=(Y1,Y2,...) 联合关联一次筛选;"
-            " false=逐表型筛选后取并集"
+            " false=单表型模式（不支持多表型逐项并集）"
         ),
     )
     parser.add_argument(
